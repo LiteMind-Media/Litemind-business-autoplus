@@ -3,7 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import React from 'react';
 import ThemeProviderClient from '@/components/ThemeProviderClient';
-import { ConvexProvider, ConvexReactClient } from 'convex/react';
+import ConvexClientProvider from '@/components/ConvexClientProvider';
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -31,16 +31,15 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const convex = React.useMemo(() => new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL || ''), []);
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
         <link rel="icon" href="/favicon.ico" sizes="any" />
       </head>
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        <ConvexProvider client={convex}>
+        <ConvexClientProvider>
           <ThemeProviderClient>{children}</ThemeProviderClient>
-        </ConvexProvider>
+        </ConvexClientProvider>
       </body>
     </html>
   );
