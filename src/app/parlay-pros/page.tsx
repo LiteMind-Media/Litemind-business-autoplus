@@ -19,6 +19,9 @@ import InstanceSidebar from '@/components/InstanceSidebar';
 import ProfileMenu from '@/components/ProfileMenu';
 import { computeLeadNumbers } from '@/utils/leads';
 import { useBrandSettings } from '@/hooks/useBrandSettings';
+import { useGoals } from '@/hooks/useGoals';
+import { useStatusColors } from '@/hooks/useStatusColors';
+import { useThemeSettings } from '@/hooks/useThemeSettings';
 
 export default function ParlayProzInstance() {
     const asStr = useCallback((v: unknown): string => (v ?? "").toString(), []);
@@ -118,8 +121,8 @@ export default function ParlayProzInstance() {
             const dl = localStorage.getItem('pp_domain_landing'); if (dl) setDomainLanding(dl);
             const df = localStorage.getItem('pp_domain_form'); if (df) setDomainFormEndpoint(df);
             const da = localStorage.getItem('pp_domain_api'); if (da) setDomainApiBase(da);
-    } catch { }
-    setHydratedBrand(true);
+        } catch { }
+        setHydratedBrand(true);
     }, []);
     // Apply remote brand when available
     useEffect(() => {
@@ -128,15 +131,15 @@ export default function ParlayProzInstance() {
         // (logos & favicon future: remote fields)
     }, [remoteBrand]);
     // Push local bootstrap to remote once if remote absent
-    useEffect(()=> {
+    useEffect(() => {
         if (pushedRemoteRef.current) return;
         if (remoteBrand === undefined) return; // still loading
         if (remoteBrand === null) {
-            saveRemoteBrand({ name: brandName }).catch(()=>{});
+            saveRemoteBrand({ name: brandName }).catch(() => { });
             pushedRemoteRef.current = true;
         }
     }, [remoteBrand, brandName, saveRemoteBrand]);
-    useEffect(() => { try { localStorage.setItem('pp_brand_name', brandName || ''); } catch { } saveRemoteBrand({ name: brandName }).catch(()=>{}); }, [brandName, saveRemoteBrand]);
+    useEffect(() => { try { localStorage.setItem('pp_brand_name', brandName || ''); } catch { } saveRemoteBrand({ name: brandName }).catch(() => { }); }, [brandName, saveRemoteBrand]);
     useEffect(() => { try { brandLogoHorizontal ? localStorage.setItem('pp_brand_logo_horizontal', brandLogoHorizontal) : localStorage.removeItem('pp_brand_logo_horizontal'); } catch { } }, [brandLogoHorizontal]);
     useEffect(() => { try { brandLogoVertical ? localStorage.setItem('pp_brand_logo_vertical', brandLogoVertical) : localStorage.removeItem('pp_brand_logo_vertical'); } catch { } }, [brandLogoVertical]);
     useEffect(() => { try { brandLogoIcon ? localStorage.setItem('pp_brand_logo_icon', brandLogoIcon) : localStorage.removeItem('pp_brand_logo_icon'); } catch { } }, [brandLogoIcon]);
@@ -178,6 +181,55 @@ export default function ParlayProzInstance() {
     const registered = useMemo(() => metrics.registered, [metrics]);
 
     const { theme, ready: themeReady, updateTheme, setPreset, presets, customStatusColors, updateStatusColor, exportTheme, importTheme } = useTheme();
+    const { themeSettings, setTheme: saveThemeRemote } = useThemeSettings();
+    const themePushedRef = useRef(false);
+    // Apply remote theme once received (after local hydration) or push local if remote empty
+    useEffect(()=> {
+        if(!themeReady) return;
+        if(themeSettings === undefined) return; // loading
+        if(themeSettings === null && !themePushedRef.current){
+            // push current theme to remote
+            saveThemeRemote({
+                from: theme.from, via: theme.via, to: theme.to, background: theme.background, cardBg: theme.cardBg, mutedBg: theme.mutedBg, border: theme.border,
+                primaryText: theme.primaryText, secondaryText: theme.secondaryText, sidebarText: theme.sidebarText, headerText: theme.headerText
+            }).catch(()=>{});
+            themePushedRef.current = true;
+            return;
+        }
+        if(themeSettings){
+            // if remote differs, update local theme (without overwriting if identical)
+            const diff = ['from','via','to','background','cardBg','mutedBg','border','primaryText','secondaryText','sidebarText','headerText'].some(k => (theme as any)[k] !== (themeSettings as any)[k]);
+            if(diff){
+                updateTheme({
+                    from: themeSettings.from, via: themeSettings.via, to: themeSettings.to, background: themeSettings.background, cardBg: themeSettings.cardBg,
+                    mutedBg: themeSettings.mutedBg, border: themeSettings.border, primaryText: themeSettings.primaryText, secondaryText: themeSettings.secondaryText,
+                    sidebarText: themeSettings.sidebarText, headerText: themeSettings.headerText
+                });
+            }
+        }
+    }, [themeReady, themeSettings, theme, updateTheme, saveThemeRemote]);
+    // Remote status colors integration (pull then push on changes)
+    const { statusColors: remoteStatusColors, setStatusColor: saveStatusColorRemote } = useStatusColors();
+    const statusPushedRef = useRef(false);
+    useEffect(()=> {
+        if(remoteStatusColors === undefined) return; // loading
+        if(remoteStatusColors && remoteStatusColors.length && !statusPushedRef.current){
+            // hydrate local with remote entries if different
+            remoteStatusColors.forEach(r => {
+                if(customStatusColors[r.key] !== r.color){ updateStatusColor(r.key, r.color); }
+            });
+            statusPushedRef.current = true;
+        } else if(remoteStatusColors === null && !statusPushedRef.current){
+            // push existing local colors
+            Object.entries(customStatusColors).forEach(([k,v])=> { saveStatusColorRemote({ key: k, color: v }); });
+            statusPushedRef.current = true;
+        }
+    }, [remoteStatusColors, customStatusColors, updateStatusColor, saveStatusColorRemote]);
+    // Wrap updateStatusColor to also write remote
+    const updateStatusColorRemoteAware = useCallback((key:string, value:string)=> {
+        updateStatusColor(key,value);
+        saveStatusColorRemote({ key, color: value }).catch(()=>{});
+    }, [updateStatusColor, saveStatusColorRemote]);
     const darkMode = theme.key === 'black';
     const leadControlViews = new Set(['table', 'grouped', 'registered', 'kanban']);
     const showLeadControls = leadControlViews.has(view);
