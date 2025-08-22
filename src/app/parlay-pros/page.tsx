@@ -18,6 +18,7 @@ import { useCustomers } from '@/hooks/useCustomers';
 import InstanceSidebar from '@/components/InstanceSidebar';
 import ProfileMenu from '@/components/ProfileMenu';
 import { computeLeadNumbers } from '@/utils/leads';
+import { useBrandSettings } from '@/hooks/useBrandSettings';
 
 export default function ParlayProzInstance() {
     const asStr = useCallback((v: unknown): string => (v ?? "").toString(), []);
@@ -97,6 +98,9 @@ export default function ParlayProzInstance() {
     const [domainFormEndpoint, setDomainFormEndpoint] = useState<string>('');
     const [domainApiBase, setDomainApiBase] = useState<string>('');
     const [hydratedBrand, setHydratedBrand] = useState(false);
+    const { brand: remoteBrand, setBrand: saveRemoteBrand } = useBrandSettings();
+    // Merge: prefer remote once loaded; local acts as bootstrap. If remote empty and we have local, push it once.
+    const pushedRemoteRef = useRef(false);
     useLayoutEffect(() => {
         // Pre-paint hydration of brand identity to avoid flicker & mismatches
         try {
@@ -114,10 +118,25 @@ export default function ParlayProzInstance() {
             const dl = localStorage.getItem('pp_domain_landing'); if (dl) setDomainLanding(dl);
             const df = localStorage.getItem('pp_domain_form'); if (df) setDomainFormEndpoint(df);
             const da = localStorage.getItem('pp_domain_api'); if (da) setDomainApiBase(da);
-        } catch { }
-        setHydratedBrand(true);
+    } catch { }
+    setHydratedBrand(true);
     }, []);
-    useEffect(() => { try { localStorage.setItem('pp_brand_name', brandName || ''); } catch { } }, [brandName]);
+    // Apply remote brand when available
+    useEffect(() => {
+        if (!remoteBrand) return;
+        if (remoteBrand.name && remoteBrand.name !== brandName) setBrandName(remoteBrand.name);
+        // (logos & favicon future: remote fields)
+    }, [remoteBrand]);
+    // Push local bootstrap to remote once if remote absent
+    useEffect(()=> {
+        if (pushedRemoteRef.current) return;
+        if (remoteBrand === undefined) return; // still loading
+        if (remoteBrand === null) {
+            saveRemoteBrand({ name: brandName }).catch(()=>{});
+            pushedRemoteRef.current = true;
+        }
+    }, [remoteBrand, brandName, saveRemoteBrand]);
+    useEffect(() => { try { localStorage.setItem('pp_brand_name', brandName || ''); } catch { } saveRemoteBrand({ name: brandName }).catch(()=>{}); }, [brandName, saveRemoteBrand]);
     useEffect(() => { try { brandLogoHorizontal ? localStorage.setItem('pp_brand_logo_horizontal', brandLogoHorizontal) : localStorage.removeItem('pp_brand_logo_horizontal'); } catch { } }, [brandLogoHorizontal]);
     useEffect(() => { try { brandLogoVertical ? localStorage.setItem('pp_brand_logo_vertical', brandLogoVertical) : localStorage.removeItem('pp_brand_logo_vertical'); } catch { } }, [brandLogoVertical]);
     useEffect(() => { try { brandLogoIcon ? localStorage.setItem('pp_brand_logo_icon', brandLogoIcon) : localStorage.removeItem('pp_brand_logo_icon'); } catch { } }, [brandLogoIcon]);
