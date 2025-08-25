@@ -1,5 +1,5 @@
-import { useQuery, useMutation } from 'convex/react';
-import { api } from '../../convex/_generated/api';
+import { useQuery, useMutation } from "convex/react";
+import { api } from "../../convex/_generated/api";
 
 export function useGoals() {
   const goals = useQuery(api.goals.getGoals, {});

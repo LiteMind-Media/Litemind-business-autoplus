@@ -14,7 +14,8 @@ import {
 import { Customer, SOURCE_OPTIONS, FIRST_CALL_STATUS_OPTIONS, SECOND_CALL_STATUS_OPTIONS, FINAL_STATUS_OPTIONS } from '@/types/customer';
 import { ChevronUp, ChevronDown, Edit3, Save, X, CalendarDays, Layers, BadgeCheck, Clock3, CheckCircle2 } from 'lucide-react';
 import Badge from './Badge';
-import { statusColor } from './UI';
+import { statusColorFromMap } from './UI';
+import { useTheme } from '@/hooks/useTheme';
 import CustomerProgressBar from './CustomerProgressBar';
 
 const columnHelper = createColumnHelper<Customer>();
@@ -29,11 +30,19 @@ interface CustomerTableProps {
   mode?: 'full' | 'compact'; // compact: limited columns, no inline edit
   onOpenCustomer?: (id: string) => void; // used in compact mode row click
   leadNumbers?: Record<string, number>; // global absolute numbering (if provided, overrides local computation)
+  pageIndex?: number; // externally controlled page index (optional)
+  onPageIndexChange?: (index: number) => void; // notify parent of page change
 }
 
-export default function CustomerTable({ data, onUpdateCustomer, selectionMode = false, selectedIds, onToggleSelect, onVisibleIdsChange, mode = 'full', onOpenCustomer, leadNumbers }: CustomerTableProps) {
+export default function CustomerTable({ data, onUpdateCustomer, selectionMode = false, selectedIds, onToggleSelect, onVisibleIdsChange, mode = 'full', onOpenCustomer, leadNumbers, pageIndex, onPageIndexChange }: CustomerTableProps) {
+  const { customStatusColors } = useTheme();
   const [editingCell, setEditingCell] = useState<string | null>(null);
   const [editValue, setEditValue] = useState<string>('');
+  // Controlled pagination support: if parent provides pageIndex we mirror it, else manage local
+  const [internalPageIndex, setInternalPageIndex] = useState(0);
+  const effectivePageIndex = pageIndex ?? internalPageIndex;
+  // Selection scope: 'page' (default) or 'all' filtered rows
+  const [selectionScope, setSelectionScope] = useState<'page' | 'all'>('page');
   // (Removed in-view filters UI; filtering now handled globally in parent view)
 
   const handleStartEdit = useCallback((rowId: string, field: string, currentValue: string) => {
@@ -52,23 +61,9 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
     setEditValue('');
   }, []);
 
-  const localNumbered = useMemo(() => {
-    if (leadNumbers) return null; // external mapping provided, skip local compute
-    const pick = (c: Customer) => c.dateAdded || c.firstCallDate || c.secondCallDate || c.finalCallDate || '';
-    return [...data].sort((a, b) => {
-      const ad = pick(a); const bd = pick(b);
-      const av = /^\d{4}-\d{2}-\d{2}$/.test(ad); const bv = /^\d{4}-\d{2}-\d{2}$/.test(bd);
-      if (av && bv) {
-        if (ad === bd) return a.id.localeCompare(b.id);
-        return ad.localeCompare(bd);
-      }
-      if (av) return -1;
-      if (bv) return 1;
-      return 0;
-    }).map((c, i) => ({ id: c.id, number: i + 1 }));
-  }, [data, leadNumbers]);
+  // Removed unused localNumbered computation (global numbering supplied by parent via leadNumbers)
 
-  const getLeadNumber = (_id: string) => undefined; // numbering temporarily disabled
+  // Lead numbering currently supplied via props (globalLeadNumbers)
 
   const columns = useMemo<ColumnDef<Customer>[]>(() => {
     // Compact mode: only a subset of columns, no inline editing
@@ -80,6 +75,18 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
           cell: ({ row }: { row: { original: Customer } }) => <CustomerProgressBar customer={row.original} />,
           enableSorting: false,
         },
+        // Global numbering column (absolute lead number) if mapping provided
+        ...(leadNumbers ? [
+          {
+            id: 'num',
+            header: '#',
+            cell: ({ row }: { row: { original: Customer } }) => {
+              const num = leadNumbers[row.original.id];
+              return <span className="text-gray-500 font-semibold tabular-nums">{num != null ? num : '—'}</span>;
+            },
+            enableSorting: false,
+          } as ColumnDef<Customer>
+        ] : []),
         columnHelper.accessor('name', { header: 'Name', cell: ({ getValue }) => <span className="font-semibold text-gray-900">{getValue()}</span> }) as ColumnDef<Customer>,
         columnHelper.accessor('phone', { header: 'Phone', cell: ({ getValue }) => <span className="font-semibold text-gray-900">{getValue()}</span> }) as ColumnDef<Customer>,
         columnHelper.accessor('dateAdded', {
@@ -100,7 +107,45 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
       if (selectionMode) {
         cols.unshift({
           id: 'select',
-          header: () => <span className="text-xs font-semibold text-gray-500">Sel</span>,
+          header: ({ table }: { table: { getRowModel: () => { rows: { original: Customer }[] }; getFilteredRowModel: () => { rows: { original: Customer }[] } } }) => {
+            const pageIds: string[] = table.getRowModel().rows.map((r) => r.original.id);
+            const filteredIds: string[] = table.getFilteredRowModel().rows.map((r) => r.original.id);
+            const scopeIds = selectionScope === 'all' ? filteredIds : pageIds;
+            const total = scopeIds.length;
+            const selectedCount = scopeIds.filter(id => selectedIds?.has(id)).length;
+            const allSelected = total > 0 && selectedCount === total;
+            const partiallySelected = selectedCount > 0 && !allSelected;
+            return (
+              <div className="flex flex-col items-start gap-1 min-w-[44px]">
+                <input
+                  type="checkbox"
+                  ref={el => { if (el) el.indeterminate = partiallySelected; }}
+                  className="h-4 w-4 cursor-pointer"
+                  aria-label={selectionScope === 'all' ? 'Select all filtered' : 'Select all on page'}
+                  checked={allSelected}
+                  onChange={() => {
+                    if (!onToggleSelect) return;
+                    if (allSelected) {
+                      scopeIds.forEach(id => { if (selectedIds?.has(id)) onToggleSelect(id); });
+                    } else {
+                      scopeIds.forEach(id => { if (!selectedIds?.has(id)) onToggleSelect(id); });
+                    }
+                  }}
+                />
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] font-semibold text-gray-500 leading-none">
+                    {selectedCount}/{total}
+                  </span>
+                  <button
+                    type="button"
+                    className="text-[9px] px-1 py-0.5 rounded border text-gray-600 hover:bg-gray-100"
+                    title={selectionScope === 'all' ? 'Switch to page scope' : 'Switch to all filtered rows'}
+                    onClick={(e) => { e.stopPropagation(); setSelectionScope(s => s === 'all' ? 'page' : 'all'); }}
+                  >{selectionScope === 'all' ? 'All' : 'Pg'}</button>
+                </div>
+              </div>
+            );
+          },
           cell: ({ row }: { row: { original: Customer } }) => (
             <input
               type="checkbox"
@@ -178,8 +223,49 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
         cell: ({ row }: { row: { original: Customer } }) => <CustomerProgressBar customer={row.original} />,
         enableSorting: false,
       },
+      // Global numbering column when provided
+      ...(leadNumbers ? [
+        {
+          id: 'num',
+          header: '#',
+          cell: ({ row }: { row: { original: Customer } }) => {
+            const num = leadNumbers[row.original.id];
+            return <span className="text-gray-500 font-semibold tabular-nums">{num != null ? num : '—'}</span>;
+          },
+          enableSorting: true,
+          // Provide a stable numeric ordering based on absolute lead number mapping
+          sortingFn: (a, b) => {
+            // a and b are Row<Customer>
+            const av = leadNumbers[a.original.id] ?? 0;
+            const bv = leadNumbers[b.original.id] ?? 0;
+            return av - bv;
+          }
+        } as ColumnDef<Customer>
+      ] : []),
       columnHelper.accessor('name', { header: 'Name', cell: EditableCell }) as ColumnDef<Customer>,
       columnHelper.accessor('phone', { header: 'Phone', cell: EditableCell }) as ColumnDef<Customer>,
+      columnHelper.display({
+        id: 'dupes',
+        header: 'Duplicates',
+        cell: ({ row }) => {
+          const c = row.original;
+          const totalDupes = (c.duplicateLeadIds?.length || 0);
+          if (!totalDupes) return <span className="text-xs text-gray-400 font-semibold">—</span>;
+          const count = totalDupes + 1; // including canonical
+          return (
+            <div className="flex flex-col gap-1">
+              <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">
+                {count}× signup{count > 1 ? 's' : ''}
+              </span>
+              {c.duplicateDateAdds && c.duplicateDateAdds.length > 0 && (
+                <span className="text-[10px] leading-tight text-gray-500 font-semibold max-w-[120px] truncate" title={['Primary:' + c.dateAdded, ...c.duplicateDateAdds].join(', ')}>
+                  {[c.dateAdded, ...c.duplicateDateAdds].filter(Boolean).slice(0, 3).join(', ')}{(c.duplicateDateAdds.length + 1) > 3 ? '…' : ''}
+                </span>
+              )}
+            </div>
+          );
+        }
+      }) as ColumnDef<Customer>,
       columnHelper.accessor('email', {
         header: 'Email', cell: ({ getValue, row, column }) => {
           const wrapped: EditableCellCtx = { getValue: () => (getValue() || '') as string, row, column };
@@ -273,10 +359,11 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
               </div>
             );
           }
-          const color = statusColor('first', value);
+          const color = statusColorFromMap(customStatusColors, 'first', value);
+          const badgeColor = typeof color === 'string' ? color : (color && 'custom' in color ? undefined : undefined);
           return (
             <div className="flex items-center justify-between group cursor-pointer hover:bg-gray-50 px-2 py-1 rounded" onClick={() => handleStartEdit(row.id, column.id, value)}>
-              {value ? (typeof color === 'object' && 'custom' in color ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border" style={{ background: color.bg, border: `1px solid ${color.border}`, color: color.text }}>{value}</span> : <Badge color={color as any}>{value}</Badge>) : <span className="text-gray-700 font-semibold">Select...</span>}
+              {value ? (typeof color === 'object' && 'custom' in color ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border" style={{ background: color.bg, border: `1px solid ${color.border}`, color: color.text }}>{value}</span> : <Badge color={badgeColor}>{value}</Badge>) : <span className="text-gray-700 font-semibold">Select...</span>}
               <Edit3 size={12} className="opacity-0 group-hover:opacity-100 text-gray-400" />
             </div>
           );
@@ -321,10 +408,11 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
               </div>
             );
           }
-          const color = statusColor('second', value);
+          const color = statusColorFromMap(customStatusColors, 'second', value);
+          const badgeColor = typeof color === 'string' ? color : (color && 'custom' in color ? undefined : undefined);
           return (
             <div className="flex items-center justify-between group cursor-pointer hover:bg-gray-50 px-2 py-1 rounded" onClick={() => handleStartEdit(row.id, column.id, value)}>
-              {value ? (typeof color === 'object' && 'custom' in color ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border" style={{ background: color.bg, border: `1px solid ${color.border}`, color: color.text }}>{value}</span> : <Badge color={color as any}>{value}</Badge>) : <span className="text-gray-700 font-semibold">Select...</span>}
+              {value ? (typeof color === 'object' && 'custom' in color ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border" style={{ background: color.bg, border: `1px solid ${color.border}`, color: color.text }}>{value}</span> : <Badge color={badgeColor}>{value}</Badge>) : <span className="text-gray-700 font-semibold">Select...</span>}
               <Edit3 size={12} className="opacity-0 group-hover:opacity-100 text-gray-400" />
             </div>
           );
@@ -348,10 +436,11 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
               </div>
             );
           }
-          const color = statusColor('final', value);
+          const color = statusColorFromMap(customStatusColors, 'final', value);
+          const badgeColor = typeof color === 'string' ? color : (color && 'custom' in color ? undefined : undefined);
           return (
             <div className="flex items-center justify-between group cursor-pointer hover:bg-gray-50 px-2 py-1 rounded" onClick={() => handleStartEdit(row.id, column.id, value)}>
-              {value ? (typeof color === 'object' && 'custom' in color ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border" style={{ background: color.bg, border: `1px solid ${color.border}`, color: color.text }}>{value}</span> : <Badge color={color as any}>{value}</Badge>) : <span className="text-gray-700 font-semibold">Select...</span>}
+              {value ? (typeof color === 'object' && 'custom' in color ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border" style={{ background: color.bg, border: `1px solid ${color.border}`, color: color.text }}>{value}</span> : <Badge color={badgeColor}>{value}</Badge>) : <span className="text-gray-700 font-semibold">Select...</span>}
               <Edit3 size={12} className="opacity-0 group-hover:opacity-100 text-gray-400" />
             </div>
           );
@@ -362,7 +451,42 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
     if (selectionMode) {
       cols.unshift({
         id: 'select',
-        header: () => <span className="text-xs font-semibold text-gray-500">Sel</span>,
+        header: ({ table }) => {
+          const pageIds: string[] = table.getRowModel().rows.map((r: { original: Customer }) => r.original.id);
+          const filteredIds: string[] = table.getFilteredRowModel().rows.map((r: { original: Customer }) => r.original.id);
+          const scopeIds = selectionScope === 'all' ? filteredIds : pageIds;
+          const total = scopeIds.length;
+          const selectedCount = scopeIds.filter(id => selectedIds?.has(id)).length;
+          const allSelected = total > 0 && selectedCount === total;
+          const partiallySelected = selectedCount > 0 && !allSelected;
+          return (
+            <div className="flex flex-col items-start gap-1 min-w-[44px]">
+              <input
+                type="checkbox"
+                ref={el => { if (el) el.indeterminate = partiallySelected; }}
+                className="h-4 w-4 cursor-pointer"
+                aria-label={selectionScope === 'all' ? 'Select all filtered' : 'Select all on page'}
+                checked={allSelected}
+                onChange={() => {
+                  if (!onToggleSelect) return;
+                  if (allSelected) scopeIds.forEach(id => { if (selectedIds?.has(id)) onToggleSelect(id); });
+                  else scopeIds.forEach(id => { if (!selectedIds?.has(id)) onToggleSelect(id); });
+                }}
+              />
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] font-semibold text-gray-500 leading-none">
+                  {selectedCount}/{total}
+                </span>
+                <button
+                  type="button"
+                  className="text-[9px] px-1 py-0.5 rounded border text-gray-600 hover:bg-gray-100"
+                  title={selectionScope === 'all' ? 'Switch to page scope' : 'Switch to all filtered rows'}
+                  onClick={(e) => { e.stopPropagation(); setSelectionScope(s => s === 'all' ? 'page' : 'all'); }}
+                >{selectionScope === 'all' ? 'All' : 'Pg'}</button>
+              </div>
+            </div>
+          );
+        },
         cell: ({ row }: { row: { original: Customer } }) => (
           <input
             type="checkbox"
@@ -376,7 +500,7 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
     }
 
     return cols;
-  }, [mode, editingCell, editValue, handleSaveEdit, handleCancelEdit, handleStartEdit, selectionMode, selectedIds, onToggleSelect, leadNumbers, localNumbered]);
+  }, [mode, editingCell, editValue, handleSaveEdit, handleCancelEdit, handleStartEdit, selectionMode, selectedIds, onToggleSelect, selectionScope, customStatusColors, leadNumbers]);
 
   // (removed old columns definition; only use the new useMemo-based columns below)
 
@@ -392,11 +516,16 @@ export default function CustomerTable({ data, onUpdateCustomer, selectionMode = 
     getFilteredRowModel: getFilteredRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
-    initialState: {
-      pagination: {
-        pageSize: 25,
-      },
+    autoResetPageIndex: false,
+    state: {
+      pagination: { pageIndex: effectivePageIndex, pageSize: 25 }
     },
+    onPaginationChange: (updater) => {
+      const current = { pageIndex: effectivePageIndex, pageSize: 25 };
+      const next = typeof updater === 'function' ? (updater as (old: typeof current) => typeof current)(current) : updater;
+      if (onPageIndexChange) onPageIndexChange(next.pageIndex);
+      else setInternalPageIndex(next.pageIndex);
+    }
   });
 
   return (

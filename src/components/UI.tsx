@@ -1,6 +1,5 @@
 "use client";
 import React from 'react';
-import { useTheme } from '@/hooks/useTheme';
 import { deriveBadgePalette } from '@/utils/color';
 
 const base = "w-full rounded-md border border-gray-200 bg-white/70 backdrop-blur-sm px-3 py-2 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition placeholder:text-gray-400";
@@ -20,18 +19,12 @@ export const TextArea = React.forwardRef<HTMLTextAreaElement, React.TextareaHTML
 export type BadgeColor = 'gray' | 'blue' | 'green' | 'red' | 'amber' | 'purple' | 'pink' | 'cyan' | 'emerald';
 
 // Enhanced status color: returns legacy palette key IF no custom override.
-export function statusColor(kind: 'first' | 'second' | 'final', value: string | undefined): BadgeColor | { custom: true; bg: string; border: string; text: string } {
+export function statusColorFromMap(customStatusColors: Record<string, string>, kind: 'first' | 'second' | 'final', value: string | undefined): BadgeColor | { custom: true; bg: string; border: string; text: string } {
     if (!value) return 'gray';
-    // Access custom status colors dynamically – hook inside function wrapper
-    try {
-        const { customStatusColors } = useTheme();
-        const hex = customStatusColors[value];
-        if (hex) {
-            const pal = deriveBadgePalette(hex);
-            return { custom: true, bg: pal.bg, border: pal.border, text: pal.text };
-        }
-    } catch {
-        // ignore hook usage errors if called outside React (should not happen in components)
+    const hex = customStatusColors[value];
+    if (hex) {
+        const pal = deriveBadgePalette(hex);
+        return { custom: true, bg: pal.bg, border: pal.border, text: pal.text };
     }
     if (kind === 'first') {
         if (value === 'Interested') return 'green';

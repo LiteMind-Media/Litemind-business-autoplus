@@ -188,7 +188,21 @@ function GroupedCustomerCard({ c, /* leadNumber */ customStatusColors, groupDate
                     <select
                         className="w-full border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/40 bg-white"
                         value={c.firstCallStatus || ""}
-                        onChange={(e) => onUpdateCustomer(c.id, { firstCallStatus: e.target.value as Customer['firstCallStatus'] })}
+                        onChange={(e) => {
+                            const val = e.target.value as Customer['firstCallStatus'];
+                            if (!val) {
+                                onUpdateCustomer(c.id, {
+                                    firstCallStatus: '' as Customer['firstCallStatus'],
+                                    firstCallDate: '',
+                                    secondCallStatus: '' as Customer['secondCallStatus'],
+                                    secondCallDate: '',
+                                    finalStatus: '' as Customer['finalStatus'],
+                                    finalCallDate: ''
+                                });
+                            } else {
+                                onUpdateCustomer(c.id, { firstCallStatus: val });
+                            }
+                        }}
                     >
                         <option value="">--</option>
                         {FIRST_CALL_STATUS_OPTIONS.map(o => (
@@ -208,7 +222,19 @@ function GroupedCustomerCard({ c, /* leadNumber */ customStatusColors, groupDate
                         <select
                             className="border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/40 bg-white"
                             value={c.secondCallStatus || ""}
-                            onChange={(e) => onUpdateCustomer(c.id, { secondCallStatus: e.target.value as Customer['secondCallStatus'] })}
+                            onChange={(e) => {
+                                const val = e.target.value as Customer['secondCallStatus'];
+                                if (!val) {
+                                    onUpdateCustomer(c.id, {
+                                        secondCallStatus: '' as Customer['secondCallStatus'],
+                                        secondCallDate: '',
+                                        finalStatus: '' as Customer['finalStatus'],
+                                        finalCallDate: ''
+                                    });
+                                } else {
+                                    onUpdateCustomer(c.id, { secondCallStatus: val });
+                                }
+                            }}
                         >
                             <option value="">--</option>
                             {SECOND_CALL_STATUS_OPTIONS.map(o => (

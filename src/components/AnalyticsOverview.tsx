@@ -5,9 +5,12 @@ import { Customer, SOURCE_OPTIONS, FINAL_STATUS_OPTIONS } from "@/types/customer
 
 type Props = {
     data: Customer[];
+    remoteCount?: number; // raw rows in Convex
+    localCount?: number;  // local session rows
+    uniquePhoneCount?: number; // deduped by phone
 };
 
-export default function AnalyticsOverview({ data }: Props) {
+export default function AnalyticsOverview({ data, remoteCount, localCount, uniquePhoneCount }: Props) {
     const stats = useMemo(() => {
         const total = data.length;
         const needFirstContact = data.filter(c => !c.firstCallDate).length;
@@ -33,8 +36,21 @@ export default function AnalyticsOverview({ data }: Props) {
     const sourceSeries = SOURCE_OPTIONS.map(label => ({ label, value: stats.bySource[label] })).filter(s => s.value > 0);
     const finalSeries = FINAL_STATUS_OPTIONS.map(label => ({ label, value: stats.byFinal[label] })).filter(s => s.value > 0);
 
+    const showCountsBar = remoteCount !== undefined || localCount !== undefined || uniquePhoneCount !== undefined;
+    const diff = (remoteCount !== undefined && localCount !== undefined) ? localCount - remoteCount : 0;
     return (
         <div className="space-y-10">
+            {showCountsBar && (
+                <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-white/70 border border-gray-200 text-[11px] font-medium">
+                    {remoteCount !== undefined && <span className="px-2 py-1 rounded-lg bg-gray-900 text-white font-semibold">Cloud {remoteCount.toLocaleString()}</span>}
+                    {localCount !== undefined && <span className="px-2 py-1 rounded-lg bg-gray-100 text-gray-800 font-semibold">Local {localCount.toLocaleString()}</span>}
+                    {uniquePhoneCount !== undefined && <span className="px-2 py-1 rounded-lg bg-blue-50 text-blue-700 font-semibold">Unique Phones {uniquePhoneCount.toLocaleString()}</span>}
+                    {remoteCount !== undefined && localCount !== undefined && diff !== 0 && (
+                        <span className={`px-2 py-1 rounded-lg font-semibold ${diff > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{diff > 0 ? '+' + diff : diff} session delta</span>
+                    )}
+                    <span className="ml-auto text-[10px] opacity-70">Cloud rows = authoritative stored leads; Local may include just-imported rows pending sync / dedupe.</span>
+                </div>
+            )}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
                 <Stat title="Total Leads" value={stats.total} variant="primary" />
                 <Stat title="Need 1st Contact" value={stats.needFirstContact} variant="warning" />
@@ -47,9 +63,9 @@ export default function AnalyticsOverview({ data }: Props) {
                 <Panel title="Lead Source Distribution">
                     <div className="flex flex-col md:flex-row md:items-center gap-8">
                         <div className="mx-auto">
-                            <DonutChart data={sourceSeries} ariaLabel="Lead source distribution" />
+                            <DonutChart data={sourceSeries} ariaLabel="Lead source distribution" colorFor={(label) => sourceColorMap[label] || '#999'} />
                         </div>
-                        <Legend items={sourceSeries} />
+                        <Legend items={sourceSeries} colorFor={(label) => sourceColorMap[label] || '#999'} />
                     </div>
                 </Panel>
                 <Panel title="Pipeline Outcomes (Final Status)">
@@ -102,6 +118,16 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
 
 // --- Charts (custom lightweight SVG components) ---
 
+// Stable color assignment (do not shift when some sources have zero values)
+const sourceColorMap: Record<string, string> = {
+    'Instagram': '#2563eb', // blue
+    'Facebook': '#6366f1',  // indigo
+    'TikTok': '#7c3aed',    // violet
+    'WhatsApp': '#059669',  // emerald
+    'Web Form': '#f59e0b',  // amber
+};
+
+// Generic fallback palette for other categorical series
 const palette = [
     '#2563eb', // blue-600
     '#db2777', // rose-600
@@ -115,12 +141,12 @@ const palette = [
 
 interface ChartDatum { label: string; value: number; }
 
-function Legend({ items }: { items: ChartDatum[] }) {
+function Legend({ items, colorFor }: { items: ChartDatum[]; colorFor?: (label: string, index: number) => string }) {
     return (
         <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm" aria-label="Legend">
-            {items.map((d, i) => (
+            {items.map((d, idx) => (
                 <li key={d.label} className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-sm" style={{ backgroundColor: palette[i % palette.length] }} aria-hidden />
+                    <span className="w-3 h-3 rounded-sm" style={{ backgroundColor: colorFor ? colorFor(d.label, idx) : palette[idx % palette.length] }} aria-hidden />
                     <span className="text-gray-700 flex-1 truncate">{d.label}</span>
                     <span className="font-semibold text-gray-900 tabular-nums">{d.value}</span>
                 </li>
@@ -130,13 +156,16 @@ function Legend({ items }: { items: ChartDatum[] }) {
     );
 }
 
-function DonutChart({ data, ariaLabel }: { data: ChartDatum[]; ariaLabel: string }) {
+function DonutChart({ data, ariaLabel, colorFor }: { data: ChartDatum[]; ariaLabel: string; colorFor?: (label: string, index: number) => string }) {
     const total = data.reduce((a, b) => a + b.value, 0);
     const center = 70;
     const radius = 60;
     const stroke = 18;
     let cumulative = 0;
-    const paths = data.map((d, i) => {
+    const paths = data.length === 1 ? (
+        // Special case: full circle (single category) or else arc path collapses
+        <circle cx={center} cy={center} r={radius} stroke={colorFor ? colorFor(data[0].label, 0) : palette[0]} strokeWidth={stroke} fill="none" />
+    ) : data.map((d, i) => {
         const startAngle = (cumulative / total) * Math.PI * 2;
         cumulative += d.value;
         const endAngle = (cumulative / total) * Math.PI * 2;
@@ -146,7 +175,7 @@ function DonutChart({ data, ariaLabel }: { data: ChartDatum[]; ariaLabel: string
         const ex = center + radius * Math.cos(endAngle);
         const ey = center + radius * Math.sin(endAngle);
         const pathData = `M ${sx} ${sy} A ${radius} ${radius} 0 ${largeArc} 1 ${ex} ${ey}`;
-        return <path key={d.label} d={pathData} stroke={palette[i % palette.length]} strokeWidth={stroke} fill="none" strokeLinecap="butt" />;
+        return <path key={d.label} d={pathData} stroke={colorFor ? colorFor(d.label, i) : palette[i % palette.length]} strokeWidth={stroke} fill="none" strokeLinecap="butt" />;
     });
     return (
         <figure className="relative" aria-label={ariaLabel} role="img">
@@ -188,7 +217,7 @@ function PeriodProgressPanel({ data }: { data: Customer[] }) {
     // Aggregate helpers
     const today = new Date();
     const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
-    const dateKey = (d: Date) => d.toISOString().slice(0, 10);
+    // removed unused dateKey helper
     const parseSafe = (s?: string) => { if (!s) return null; const d = new Date(s); return isNaN(d.getTime()) ? null : d; };
     const addedDates: Date[] = data.map(c => parseSafe(c.dateAdded)).filter((d): d is Date => !!d);
 

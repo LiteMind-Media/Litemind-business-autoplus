@@ -4,6 +4,7 @@
 // Original Parlay Proz instance moved to /parlay-pros
 
 import Link from 'next/link';
+import Image from 'next/image';
 import { Plus, ExternalLink, FolderKanban, Users, Database, Settings, ArrowRight } from 'lucide-react';
 import { useEffect } from 'react';
 import { useInstances } from '@/hooks/useInstances';
@@ -24,7 +25,7 @@ export default function BusinessAutoPlusRoot() {
       <header className="sticky top-0 z-30 backdrop-blur bg-white/70 border-b border-gray-200">
         <div className="mx-auto max-w-7xl px-6 py-6 flex items-center justify-between">
           <h1 className="flex items-center gap-3 text-2xl md:text-3xl font-black tracking-tight">
-            <img src="/LiteMind%20Logo.png" alt="Logo" className="w-12 h-12 object-contain" />
+            <Image src="/LiteMind%20Logo.png" alt="Logo" width={48} height={48} className="w-12 h-12 object-contain" />
             <span className="text-black leading-none">BUSINESS AUTO+</span>
           </h1>
           <div className="flex items-center gap-3">
@@ -72,7 +73,7 @@ export default function BusinessAutoPlusRoot() {
           <button onClick={() => {
             const name = prompt('Instance name?');
             if (!name) return;
-            try { createInstance({ name }); } catch (e: any) { alert(e.message); }
+            try { createInstance({ name }); } catch (e) { if (e instanceof Error) alert(e.message); }
           }} className="rounded-2xl border-2 border-dashed border-gray-300 hover:border-black/50 bg-white/50 backdrop-blur p-6 flex flex-col items-center justify-center gap-3 text-gray-500 hover:text-black transition">
             <Plus size={24} />
             <span className="text-sm font-semibold">Create New Instance</span>

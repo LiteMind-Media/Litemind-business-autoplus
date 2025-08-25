@@ -50,7 +50,9 @@ const columnIcon: Record<ColumnId, React.ReactNode> = {
 
 export default function KanbanPipeline({ data, onUpdateCustomer, selectedIds, onToggleSelect, onOpen, leadNumbers: externalLeadNumbers }: KanbanPipelineProps) {
     const { customStatusColors } = useTheme();
-    const leadNumbers = externalLeadNumbers || useMemo(() => computeLeadNumbers(data), [data]);
+    // Always call hook; then choose external if provided to satisfy hooks rules
+    const computedLeadNumbers = useMemo(() => computeLeadNumbers(data), [data]);
+    const leadNumbers = externalLeadNumbers || computedLeadNumbers;
     // Group customers by derived column
     const groups = useMemo(() => {
         const map: Record<ColumnId, Customer[]> = {
@@ -85,7 +87,13 @@ export default function KanbanPipeline({ data, onUpdateCustomer, selectedIds, on
                 patch.finalCallDate = '';
                 break;
             case 'first_contact':
+                // Ensure date, but clear any statuses beyond this column
                 patch.firstCallDate = patch.firstCallDate || new Date().toISOString().slice(0, 10);
+                patch.firstCallStatus = '' as Customer['firstCallStatus'];
+                patch.secondCallDate = '';
+                patch.secondCallStatus = '' as Customer['secondCallStatus'];
+                patch.finalStatus = '' as Customer['finalStatus'];
+                patch.finalCallDate = '';
                 break;
             case 'first_status':
                 patch.firstCallDate = patch.firstCallDate || new Date().toISOString().slice(0, 10);

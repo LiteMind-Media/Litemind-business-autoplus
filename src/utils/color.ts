@@ -66,11 +66,26 @@ export function luminance({
 export function deriveBadgePalette(hex: string) {
   const rgb = parseHex(hex);
   if (!rgb) return { bg: hex, border: hex, text: "#111827" };
-  const lum = luminance(rgb);
-  // Create background & border tints
-  const bg = toHex(mixWithWhite(rgb, 0.85));
-  const border = toHex(mixWithWhite(rgb, 0.55));
-  // Choose text color for contrast; if lum < ~0.55 use white blend
-  const text = lum < 0.45 ? toHex(mixWithWhite(rgb, 0.9)) : "#1F2937";
+  // Create background & border tints (very light bg for subtle pastel badge)
+  const bgRgb = mixWithWhite(rgb, 0.85);
+  const borderRgb = mixWithWhite(rgb, 0.55);
+  const bg = toHex(bgRgb);
+  const border = toHex(borderRgb);
+
+  // Decide text color based on contrast with background rather than original color.
+  const bgLum = luminance(bgRgb);
+  const contrast = (lumA: number, lumB: number) => {
+    const L1 = Math.max(lumA, lumB);
+    const L2 = Math.min(lumA, lumB);
+    return (L1 + 0.05) / (L2 + 0.05);
+  };
+  const darkRgb = { r: 17, g: 24, b: 39 }; // #111827
+  const whiteRgb = { r: 255, g: 255, b: 255 };
+  const darkLum = luminance(darkRgb);
+  const whiteLum = luminance(whiteRgb);
+  const contrastDark = contrast(bgLum, darkLum);
+  const contrastWhite = contrast(bgLum, whiteLum);
+  // Prefer color with higher contrast; bias slightly toward dark text for light pastels
+  const text = contrastDark >= contrastWhite * 0.9 ? "#111827" : "#ffffff";
   return { bg, border, text };
 }

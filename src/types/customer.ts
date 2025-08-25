@@ -25,6 +25,13 @@ export interface Customer {
   device?: string; // e.g. "iOS", "Android", "Desktop"
   leadScore?: number; // heuristic 0-100
   lastUpdated?: string; // ISO date for last modification
+  // WhatsApp enrichment
+  lastMessageSnippet?: string; // truncated last message
+  messageCount?: number; // number of messages in conversation
+  // Duplicate merge metadata
+  duplicatePhones?: string[]; // other raw phone variants merged
+  duplicateLeadIds?: string[]; // other leadIds merged into this record
+  duplicateDateAdds?: string[]; // additional dateAdded values from duplicates
 }
 
 export type CustomerField = keyof Customer;

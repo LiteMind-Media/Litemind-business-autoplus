@@ -10,10 +10,13 @@ import CustomerCardsGrouped from "@/components/CustomerCardsGrouped";
 import KanbanPipeline from "@/components/KanbanPipeline";
 import CustomerModal from "@/components/CustomerModal";
 import AnalyticsOverview from "@/components/AnalyticsOverview";
-import { Customer, SOURCE_OPTIONS, FIRST_CALL_STATUS_OPTIONS, SECOND_CALL_STATUS_OPTIONS, FINAL_STATUS_OPTIONS } from "@/types/customer";
-import { BarChart3, Workflow, Search, Filter, CheckSquare, Square, Settings, Trophy } from 'lucide-react';
+import { Customer, SOURCE_OPTIONS, FINAL_STATUS_OPTIONS, FIRST_CALL_STATUS_OPTIONS, SECOND_CALL_STATUS_OPTIONS } from "@/types/customer";
+import { Search, Filter, Download, CheckSquare, Square } from 'lucide-react';
 import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
-import { useTheme } from '@/hooks/useTheme';
+import Papa from 'papaparse';
+import { useMutation } from 'convex/react';
+import { api } from '@/../convex/_generated/api';
+import { useTheme, BrandTheme } from '@/hooks/useTheme';
 import { useCustomers } from '@/hooks/useCustomers';
 import InstanceSidebar from '@/components/InstanceSidebar';
 import ProfileMenu from '@/components/ProfileMenu';
@@ -24,13 +27,9 @@ import { useStatusColors } from '@/hooks/useStatusColors';
 import { useThemeSettings } from '@/hooks/useThemeSettings';
 
 export default function ParlayProzInstance() {
-    const asStr = useCallback((v: unknown): string => (v ?? "").toString(), []);
-    const asSource = useCallback((v: unknown): Customer['source'] => { const s = asStr(v) as Customer['source']; return (SOURCE_OPTIONS as readonly string[]).includes(s) ? s : ''; }, [asStr]);
-    const asFirstStatus = useCallback((v: unknown): Customer['firstCallStatus'] => { const s = asStr(v) as Customer['firstCallStatus']; return (FIRST_CALL_STATUS_OPTIONS as readonly string[]).includes(s) ? s : ''; }, [asStr]);
-    const asSecondStatus = useCallback((v: unknown): Customer['secondCallStatus'] => { const s = asStr(v) as Customer['secondCallStatus']; return (SECOND_CALL_STATUS_OPTIONS as readonly string[]).includes(s) ? s : ''; }, [asStr]);
-    const asFinalStatus = useCallback((v: unknown): Customer['finalStatus'] => { const s = asStr(v) as Customer['finalStatus']; return (FINAL_STATUS_OPTIONS as readonly string[]).includes(s) ? s : ''; }, [asStr]);
+    // removed unused casting helpers (no dynamic ingestion here)
 
-    const { customers, updateCustomer, bulkUpdate, undo, redo, canUndo, canRedo, metrics } = useCustomers({ instance: 'parlay-pros' });
+    const { customers, updateCustomer, bulkUpdate, undo, redo, canUndo, canRedo, metrics, forceSync, remoteCount, uniquePhoneCount } = useCustomers({ instance: 'parlay-pros' });
     const [view, setView] = useState<'dashboard' | 'table' | 'cards' | 'grouped' | 'registered' | 'analytics' | 'kanban' | 'settings'>('dashboard');
     const allowedViews = useRef(new Set(['dashboard', 'table', 'cards', 'grouped', 'registered', 'analytics', 'kanban', 'settings']));
     const hydratedView = useRef(false);
@@ -39,11 +38,11 @@ export default function ParlayProzInstance() {
         try {
             const saved = localStorage.getItem('pp_last_view');
             if (saved && allowedViews.current.has(saved)) {
-                setView(saved as any);
+                setView(saved as typeof view);
             }
-        } catch { }
+        } catch { /* noop */ }
         hydratedView.current = true;
-    }, []);
+    }, []); // runs once on mount
     useEffect(() => {
         if (!hydratedView.current) return; // avoid overwriting during initial mount before restore
         try { localStorage.setItem('pp_last_view', view); } catch { }
@@ -73,19 +72,22 @@ export default function ParlayProzInstance() {
     }, [view]);
 
     const changeView = useCallback((next: string) => {
-        if (next === view) return;
+        if (!allowedViews.current.has(next) || next === view) return;
         scrollPositions.current[view] = window.scrollY;
         pendingRestore.current = true;
-        setView(next as any);
+        setView(next as typeof view);
         clearSelection();
     }, [view, clearSelection]);
     const [search, setSearch] = useState('');
-    const [showFilters, setShowFilters] = useState(false);
     const [anchorFilter, setAnchorFilter] = useState(false);
     const [filterSource, setFilterSource] = useState<string>('');
     const [filterFinal, setFilterFinal] = useState<string>('');
+    const [filterFirstCall, setFilterFirstCall] = useState<string>('');
+    const [filterSecondCall, setFilterSecondCall] = useState<string>('');
     const [openCustomerId, setOpenCustomerId] = useState<string | null>(null);
     const openCustomer = customers.find(c => c.id === openCustomerId) || null;
+    // Preserve pagination page for table view (avoid reset to page 1 after edits/modal close)
+    const [tablePageIndex, setTablePageIndex] = useState(0);
 
     // Brand identity (name, logo, favicon) with local persistence
     const [brandName, setBrandName] = useState<string>('Parlay Proz');
@@ -111,7 +113,7 @@ export default function ParlayProzInstance() {
             const lh = localStorage.getItem('pp_brand_logo_horizontal'); if (lh) setBrandLogoHorizontal(lh);
             const lv = localStorage.getItem('pp_brand_logo_vertical'); if (lv) setBrandLogoVertical(lv);
             const li = localStorage.getItem('pp_brand_logo_icon'); if (li) setBrandLogoIcon(li);
-            const lvSel = localStorage.getItem('pp_brand_logo_variant'); if (['horizontal', 'vertical', 'icon', 'text', 'icon-text'].includes(lvSel || '')) setBrandLogoVariant(lvSel as any);
+            const lvSel = localStorage.getItem('pp_brand_logo_variant'); if (lvSel && ['horizontal', 'vertical', 'icon', 'text', 'icon-text'].includes(lvSel)) setBrandLogoVariant(lvSel as typeof brandLogoVariant);
             const ls = localStorage.getItem('pp_brand_logo_size'); if (ls && !isNaN(Number(ls))) setBrandLogoSize(Math.min(2, Math.max(0.4, Number(ls))));
             const legacy = localStorage.getItem('pp_brand_logo');
             if (legacy && !lh && !lv && !li) { setBrandLogoHorizontal(legacy); }
@@ -129,7 +131,7 @@ export default function ParlayProzInstance() {
         if (!remoteBrand) return;
         if (remoteBrand.name && remoteBrand.name !== brandName) setBrandName(remoteBrand.name);
         // (logos & favicon future: remote fields)
-    }, [remoteBrand]);
+    }, [remoteBrand, brandName]);
     // Push local bootstrap to remote once if remote absent
     useEffect(() => {
         if (pushedRemoteRef.current) return;
@@ -139,18 +141,23 @@ export default function ParlayProzInstance() {
             pushedRemoteRef.current = true;
         }
     }, [remoteBrand, brandName, saveRemoteBrand]);
-    useEffect(() => { try { localStorage.setItem('pp_brand_name', brandName || ''); } catch { } saveRemoteBrand({ name: brandName }).catch(() => { }); }, [brandName, saveRemoteBrand]);
-    useEffect(() => { try { brandLogoHorizontal ? localStorage.setItem('pp_brand_logo_horizontal', brandLogoHorizontal) : localStorage.removeItem('pp_brand_logo_horizontal'); } catch { } }, [brandLogoHorizontal]);
-    useEffect(() => { try { brandLogoVertical ? localStorage.setItem('pp_brand_logo_vertical', brandLogoVertical) : localStorage.removeItem('pp_brand_logo_vertical'); } catch { } }, [brandLogoVertical]);
-    useEffect(() => { try { brandLogoIcon ? localStorage.setItem('pp_brand_logo_icon', brandLogoIcon) : localStorage.removeItem('pp_brand_logo_icon'); } catch { } }, [brandLogoIcon]);
-    useEffect(() => { try { localStorage.setItem('pp_brand_logo_variant', brandLogoVariant); } catch { } }, [brandLogoVariant]);
-    useEffect(() => { try { localStorage.setItem('pp_brand_logo_size', String(brandLogoSize)); } catch { } }, [brandLogoSize]);
-    useEffect(() => { try { brandFavicon ? localStorage.setItem('pp_brand_favicon', brandFavicon) : localStorage.removeItem('pp_brand_favicon'); } catch { } }, [brandFavicon]);
-    // Domain persistence
-    useEffect(() => { try { domainPrimary ? localStorage.setItem('pp_domain_primary', domainPrimary) : localStorage.removeItem('pp_domain_primary'); } catch { } }, [domainPrimary]);
-    useEffect(() => { try { domainLanding ? localStorage.setItem('pp_domain_landing', domainLanding) : localStorage.removeItem('pp_domain_landing'); } catch { } }, [domainLanding]);
-    useEffect(() => { try { domainFormEndpoint ? localStorage.setItem('pp_domain_form', domainFormEndpoint) : localStorage.removeItem('pp_domain_form'); } catch { } }, [domainFormEndpoint]);
-    useEffect(() => { try { domainApiBase ? localStorage.setItem('pp_domain_api', domainApiBase) : localStorage.removeItem('pp_domain_api'); } catch { } }, [domainApiBase]);
+    // Persistence effects consolidated; previous individual effects removed (replaced to satisfy lint)
+    useEffect(() => {
+        try {
+            localStorage.setItem('pp_brand_name', brandName || '');
+            if (brandLogoHorizontal) localStorage.setItem('pp_brand_logo_horizontal', brandLogoHorizontal); else localStorage.removeItem('pp_brand_logo_horizontal');
+            if (brandLogoVertical) localStorage.setItem('pp_brand_logo_vertical', brandLogoVertical); else localStorage.removeItem('pp_brand_logo_vertical');
+            if (brandLogoIcon) localStorage.setItem('pp_brand_logo_icon', brandLogoIcon); else localStorage.removeItem('pp_brand_logo_icon');
+            localStorage.setItem('pp_brand_logo_variant', brandLogoVariant);
+            localStorage.setItem('pp_brand_logo_size', String(brandLogoSize));
+            if (brandFavicon) localStorage.setItem('pp_brand_favicon', brandFavicon); else localStorage.removeItem('pp_brand_favicon');
+            if (domainPrimary) localStorage.setItem('pp_domain_primary', domainPrimary); else localStorage.removeItem('pp_domain_primary');
+            if (domainLanding) localStorage.setItem('pp_domain_landing', domainLanding); else localStorage.removeItem('pp_domain_landing');
+            if (domainFormEndpoint) localStorage.setItem('pp_domain_form', domainFormEndpoint); else localStorage.removeItem('pp_domain_form');
+            if (domainApiBase) localStorage.setItem('pp_domain_api', domainApiBase); else localStorage.removeItem('pp_domain_api');
+        } catch { /* ignore storage errors */ }
+        saveRemoteBrand({ name: brandName }).catch(() => { });
+    }, [brandName, brandLogoHorizontal, brandLogoVertical, brandLogoIcon, brandLogoVariant, brandLogoSize, brandFavicon, domainPrimary, domainLanding, domainFormEndpoint, domainApiBase, saveRemoteBrand]);
     // Update document title & favicon dynamically
     useEffect(() => { document.title = (brandName ? brandName : 'Parlay Proz') + ' Dashboard'; }, [brandName]);
     useEffect(() => {
@@ -174,66 +181,141 @@ export default function ParlayProzInstance() {
         }
         if (filterSource) list = list.filter(c => c.source === filterSource);
         if (filterFinal) list = list.filter(c => c.finalStatus === filterFinal);
+        if (filterFirstCall) list = list.filter(c => c.firstCallStatus === filterFirstCall);
+        if (filterSecondCall) list = list.filter(c => c.secondCallStatus === filterSecondCall);
         return list;
-    }, [customers, search, filterSource, filterFinal]);
+    }, [customers, search, filterSource, filterFinal, filterFirstCall, filterSecondCall]);
+    // Clamp table page index if filtered results shrink below current page start
+    useEffect(() => {
+        if (view !== 'table') return; // only relevant in table view
+        const pageSize = 25;
+        const maxPageIndex = Math.max(0, Math.floor(Math.max(0, sorted.length - 1) / pageSize));
+        if (tablePageIndex > maxPageIndex) setTablePageIndex(maxPageIndex);
+    }, [sorted.length, tablePageIndex, view]);
     // Global (absolute) lead numbering based on full customer set, not filtered subset.
     const globalLeadNumbers = useMemo(() => computeLeadNumbers(customers), [customers]);
     const registered = useMemo(() => metrics.registered, [metrics]);
 
-    const { theme, ready: themeReady, updateTheme, setPreset, presets, customStatusColors, updateStatusColor, exportTheme, importTheme } = useTheme();
+    // Theme (local) + remote sync
+    const { theme, ready: themeReady, updateTheme: updateThemeLocal, setPreset: setPresetLocal, presets, customStatusColors, updateStatusColor, exportTheme, importTheme } = useTheme();
     const { themeSettings, setTheme: saveThemeRemote } = useThemeSettings();
     const themePushedRef = useRef(false);
+    const lastLocalThemeChangeRef = useRef<string | null>(null);
+
+    // Wrap local update to also persist remotely and mark timestamp so we don't immediately overwrite from stale remote copy.
+    const updateTheme = useCallback((partial: Partial<BrandTheme>) => {
+        const stamp = new Date().toISOString();
+        lastLocalThemeChangeRef.current = stamp;
+        // compute next theme snapshot (since state won't reflect until next render)
+        const next: BrandTheme = { ...theme, ...partial };
+        updateThemeLocal(partial);
+        // push full theme to remote (fire and forget)
+        saveThemeRemote({
+            from: next.from, via: next.via, to: next.to, background: next.background, cardBg: next.cardBg, mutedBg: next.mutedBg, border: next.border,
+            primaryText: next.primaryText, secondaryText: next.secondaryText, sidebarText: next.sidebarText, headerText: next.headerText
+        }).catch(() => { });
+    }, [theme, updateThemeLocal, saveThemeRemote]);
+
+    // Status color remote sync (defer helper definitions until just before render for clarity later)
+    const { statusColors: remoteStatusColors, setStatusColor: saveStatusColorRemote } = useStatusColors();
+    const statusPushedRef = useRef(false);
+
+    const setPreset = useCallback((key: string) => {
+        const preset = (presets as Record<string, BrandTheme>)[key];
+        if (!preset) return;
+        const stamp = new Date().toISOString();
+        lastLocalThemeChangeRef.current = stamp;
+        setPresetLocal(key);
+        saveThemeRemote({
+            from: preset.from, via: preset.via, to: preset.to, background: preset.background, cardBg: preset.cardBg, mutedBg: preset.mutedBg, border: preset.border,
+            primaryText: preset.primaryText, secondaryText: preset.secondaryText, sidebarText: preset.sidebarText, headerText: preset.headerText
+        }).catch(() => { });
+        // We'll regenerate status colors after helper definitions (flag via ref)
+        statusPaletteNeedsRegenerationRef.current = true;
+    }, [presets, setPresetLocal, saveThemeRemote]);
     // Apply remote theme once received (after local hydration) or push local if remote empty
-    useEffect(()=> {
-        if(!themeReady) return;
-        if(themeSettings === undefined) return; // loading
-        if(themeSettings === null && !themePushedRef.current){
+    useEffect(() => {
+        if (!themeReady) return;
+        if (themeSettings === undefined) return; // loading
+        if (themeSettings === null && !themePushedRef.current) {
             // push current theme to remote
             saveThemeRemote({
                 from: theme.from, via: theme.via, to: theme.to, background: theme.background, cardBg: theme.cardBg, mutedBg: theme.mutedBg, border: theme.border,
                 primaryText: theme.primaryText, secondaryText: theme.secondaryText, sidebarText: theme.sidebarText, headerText: theme.headerText
-            }).catch(()=>{});
+            }).catch(() => { });
             themePushedRef.current = true;
             return;
         }
-        if(themeSettings){
-            // if remote differs, update local theme (without overwriting if identical)
-            const diff = ['from','via','to','background','cardBg','mutedBg','border','primaryText','secondaryText','sidebarText','headerText'].some(k => (theme as any)[k] !== (themeSettings as any)[k]);
-            if(diff){
-                updateTheme({
+        if (themeSettings) {
+            // If we have a recent unsynced local change (timestamp newer than remote), skip applying remote snapshot
+            if (lastLocalThemeChangeRef.current && themeSettings.updatedAt && themeSettings.updatedAt < lastLocalThemeChangeRef.current) {
+                return; // local newer; remote update pending or in-flight
+            }
+            // if remote differs (and not newer local), update local theme (without marking as local change)
+            const themeKeys: (keyof BrandTheme)[] = ['from', 'via', 'to', 'background', 'cardBg', 'mutedBg', 'border', 'primaryText', 'secondaryText', 'sidebarText', 'headerText'];
+            const diff = themeKeys.some(k => theme[k] !== (themeSettings as unknown as Record<string, string>)[k]);
+            if (diff) {
+                updateThemeLocal({
                     from: themeSettings.from, via: themeSettings.via, to: themeSettings.to, background: themeSettings.background, cardBg: themeSettings.cardBg,
                     mutedBg: themeSettings.mutedBg, border: themeSettings.border, primaryText: themeSettings.primaryText, secondaryText: themeSettings.secondaryText,
                     sidebarText: themeSettings.sidebarText, headerText: themeSettings.headerText
                 });
             }
         }
-    }, [themeReady, themeSettings, theme, updateTheme, saveThemeRemote]);
-    // Remote status colors integration (pull then push on changes)
-    const { statusColors: remoteStatusColors, setStatusColor: saveStatusColorRemote } = useStatusColors();
-    const statusPushedRef = useRef(false);
-    useEffect(()=> {
-        if(remoteStatusColors === undefined) return; // loading
-        if(remoteStatusColors && remoteStatusColors.length && !statusPushedRef.current){
-            // hydrate local with remote entries if different
-            remoteStatusColors.forEach(r => {
-                if(customStatusColors[r.key] !== r.color){ updateStatusColor(r.key, r.color); }
-            });
+    }, [themeReady, themeSettings, theme, updateThemeLocal, saveThemeRemote]);
+    // Prepare status palette helpers (defined once theme & hooks available)
+    const statusPaletteNeedsRegenerationRef = useRef(false);
+    const generateStatusPalette = useCallback(() => {
+        const baseStatuses = ['Interested', 'Answered', 'Voicemail', 'They Called', 'We Called', 'Registered', 'Follow-up Needed', 'Not Registered'] as const;
+        const stops = [theme.from, theme.via, theme.to] as const;
+        const shift = (hex: string, factor: number) => {
+            if (!hex || !hex.startsWith('#') || hex.length !== 7) return hex;
+            const r = parseInt(hex.slice(1, 3), 16);
+            const g = parseInt(hex.slice(3, 5), 16);
+            const b = parseInt(hex.slice(5, 7), 16);
+            const scale = (c: number) => Math.max(0, Math.min(255, Math.round(c * factor)));
+            return '#' + [scale(r), scale(g), scale(b)].map(v => v.toString(16).padStart(2, '0')).join('');
+        };
+        const palette = [
+            shift(stops[0], 1.15), shift(stops[0], 0.95), shift(stops[1], 1.05), shift(stops[1], 0.85),
+            shift(stops[2], 1.10), shift(stops[2], 0.90), shift(stops[1], 0.70), shift(stops[2], 0.60)
+        ] as const;
+        return Object.fromEntries(baseStatuses.map((s, i) => [s, palette[i]])) as Record<typeof baseStatuses[number], string>;
+    }, [theme.from, theme.via, theme.to]);
+    const updateStatusColorRemoteAware = useCallback((key: string, value: string) => {
+        updateStatusColor(key, value);
+        saveStatusColorRemote({ key, color: value }).catch(() => { });
+    }, [updateStatusColor, saveStatusColorRemote]);
+    const regenerateStatusPalette = useCallback(() => {
+        const map = generateStatusPalette();
+        Object.entries(map).forEach(([k, v]) => updateStatusColorRemoteAware(k, v as string));
+    }, [generateStatusPalette, updateStatusColorRemoteAware]);
+    // (Legacy refs removed; using direct functions in JSX now)
+    // Initial hydrate or seed
+    useEffect(() => {
+        if (remoteStatusColors === undefined) return;
+        if (remoteStatusColors && remoteStatusColors.length && !statusPushedRef.current) {
+            remoteStatusColors.forEach(r => { if (customStatusColors[r.key] !== r.color) updateStatusColor(r.key, r.color); });
             statusPushedRef.current = true;
-        } else if(remoteStatusColors === null && !statusPushedRef.current){
-            // push existing local colors
-            Object.entries(customStatusColors).forEach(([k,v])=> { saveStatusColorRemote({ key: k, color: v }); });
+        } else if (remoteStatusColors === null && !statusPushedRef.current) {
+            const map = generateStatusPalette();
+            Object.entries(map).forEach(([k, v]) => saveStatusColorRemote({ key: k, color: v as string }));
             statusPushedRef.current = true;
         }
-    }, [remoteStatusColors, customStatusColors, updateStatusColor, saveStatusColorRemote]);
-    // Wrap updateStatusColor to also write remote
-    const updateStatusColorRemoteAware = useCallback((key:string, value:string)=> {
-        updateStatusColor(key,value);
-        saveStatusColorRemote({ key, color: value }).catch(()=>{});
-    }, [updateStatusColor, saveStatusColorRemote]);
+    }, [remoteStatusColors, customStatusColors, updateStatusColor, saveStatusColorRemote, generateStatusPalette]);
+    // After preset selection flag, regenerate once remote is ready
+    useEffect(() => {
+        if (statusPaletteNeedsRegenerationRef.current) {
+            regenerateStatusPalette();
+            statusPaletteNeedsRegenerationRef.current = false;
+        }
+    }, [regenerateStatusPalette]);
     const darkMode = theme.key === 'black';
-    const leadControlViews = new Set(['table', 'grouped', 'registered', 'kanban']);
-    const showLeadControls = leadControlViews.has(view);
-    const showJumpTo = new Set(['table', 'grouped', 'registered']).has(view); // All Leads, Daily Leads, Customers
+    const leadControlViewsList = ['table', 'grouped', 'registered', 'kanban'] as const;
+    const leadControlViews = new Set(leadControlViewsList);
+    const showLeadControls = leadControlViews.has(view as typeof leadControlViewsList[number]);
+    const jumpToViewsList = ['table', 'grouped', 'registered'] as const; // All Leads, Daily Leads, Customers
+    const showJumpTo = new Set(jumpToViewsList).has(view as typeof jumpToViewsList[number]);
     // Jump-to-date state (used for Daily Leads vs Registrations chart highlighting / scroll)
     const [jumpDate, setJumpDate] = useState<string>('');
     const [showJumpPicker, setShowJumpPicker] = useState(false);
@@ -253,7 +335,15 @@ export default function ParlayProzInstance() {
     const tv = themeReady ? theme : fallbackTheme;
     return (
         <main suppressHydrationWarning className={`min-h-screen font-sans flex ${darkMode ? 'bg-[#0F1115] text-white' : 'bg-[radial-gradient(circle_at_30%_20%,var(--brand-bg),transparent_60%)] bg-gradient-to-br from-white via-[var(--brand-bg)] to-[var(--brand-bg)]'}`}
-            style={{ ['--brand-from' as any]: tv.from, ['--brand-via' as any]: tv.via, ['--brand-to' as any]: tv.to, ['--brand-text' as any]: tv.text, ['--brand-bg' as any]: tv.background, ['--brand-sidebar-text' as any]: tv.sidebarText, ['--brand-header-text' as any]: tv.headerText }}>
+            style={{
+                ['--brand-from' as string]: tv.from,
+                ['--brand-via' as string]: tv.via,
+                ['--brand-to' as string]: tv.to,
+                ['--brand-text' as string]: tv.text,
+                ['--brand-bg' as string]: tv.background,
+                ['--brand-sidebar-text' as string]: tv.sidebarText,
+                ['--brand-header-text' as string]: tv.headerText
+            } as React.CSSProperties}>
             {!themeReady && (
                 <div className="fixed inset-0 z-[999] flex items-center justify-center bg-white dark:bg-[#0F1115] transition-opacity">
                     <div className="flex flex-col items-center gap-4">
@@ -279,7 +369,9 @@ export default function ParlayProzInstance() {
                                 const h = Math.round(base * brandLogoSize);
                                 return (
                                     <h1 className="flex items-center gap-3 text-xl md:text-2xl font-black tracking-tight select-none">
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
                                         {iconForCombo && <img src={iconForCombo} alt="Icon" style={{ height: h, width: h }} className="object-contain" />}
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
                                         {selected && !iconForCombo && <img src={selected} alt="Logo" style={{ height: h, width: brandLogoVariant === 'icon' ? h : 'auto', maxHeight: 160, maxWidth: 320 }} className={`object-contain ${brandLogoVariant === 'icon' ? '' : 'max-w-[260px]'}`} />}
                                         {showText && <span className="bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-transparent bg-clip-text leading-none drop-shadow-sm">{brandName || 'Brand'}</span>}
                                     </h1>
@@ -312,8 +404,22 @@ export default function ParlayProzInstance() {
                                                         {FINAL_STATUS_OPTIONS.map(s => <FilterChip key={s} label={s} active={filterFinal === s} onClick={() => setFilterFinal(s)} />)}
                                                     </div>
                                                 </div>
+                                                <div className="space-y-2">
+                                                    <div className="text-[10px] uppercase tracking-wide font-semibold" style={{ color: '#2e1b40' }}>1st Call Status</div>
+                                                    <div className="flex flex-wrap gap-2">
+                                                        <FilterChip label="All" active={!filterFirstCall} onClick={() => setFilterFirstCall('')} />
+                                                        {FIRST_CALL_STATUS_OPTIONS.map(s => <FilterChip key={s} label={s} active={filterFirstCall === s} onClick={() => setFilterFirstCall(s)} />)}
+                                                    </div>
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <div className="text-[10px] uppercase tracking-wide font-semibold" style={{ color: '#2e1b40' }}>2nd Call Status</div>
+                                                    <div className="flex flex-wrap gap-2">
+                                                        <FilterChip label="All" active={!filterSecondCall} onClick={() => setFilterSecondCall('')} />
+                                                        {SECOND_CALL_STATUS_OPTIONS.map(s => <FilterChip key={s} label={s} active={filterSecondCall === s} onClick={() => setFilterSecondCall(s)} />)}
+                                                    </div>
+                                                </div>
                                                 <div className="flex items-center justify-between pt-2">
-                                                    <button onClick={() => { setFilterSource(''); setFilterFinal(''); }} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Reset</button>
+                                                    <button onClick={() => { setFilterSource(''); setFilterFinal(''); setFilterFirstCall(''); setFilterSecondCall(''); }} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Reset</button>
                                                     <button onClick={() => setAnchorFilter(false)} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white shadow">Done</button>
                                                 </div>
                                             </div>
@@ -355,12 +461,12 @@ export default function ParlayProzInstance() {
                                                         <button onClick={clearSelection} className="text-[11px] font-semibold" style={{ color: '#2e1b40' }} >Clear</button>
                                                     </div>
                                                     <div className="grid grid-cols-2 gap-3">
-                                                        <BulkBtn label="Mark Interested" onClick={() => { bulkUpdate(Array.from(selectedIds), { firstCallStatus: 'Interested' as any }); }} />
-                                                        <BulkBtn label="Mark Answered" onClick={() => { bulkUpdate(Array.from(selectedIds), { firstCallStatus: 'Answered' as any }); }} />
-                                                        <BulkBtn label="Final Registered" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Registered' as any }); }} />
-                                                        <BulkBtn label="Final Not Reg" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Not Registered' as any }); }} />
-                                                        <BulkBtn label="Final Follow-up" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Follow-up Needed' as any }); }} />
-                                                        <BulkBtn label="Clear Final" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: '' as any }); }} />
+                                                        <BulkBtn label="Mark Interested" onClick={() => { bulkUpdate(Array.from(selectedIds), { firstCallStatus: 'Interested' }); }} />
+                                                        <BulkBtn label="Mark Answered" onClick={() => { bulkUpdate(Array.from(selectedIds), { firstCallStatus: 'Answered' }); }} />
+                                                        <BulkBtn label="Final Registered" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Registered' }); }} />
+                                                        <BulkBtn label="Final Not Reg" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Not Registered' }); }} />
+                                                        <BulkBtn label="Final Follow-up" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Follow-up Needed' }); }} />
+                                                        <BulkBtn label="Clear Final" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: '' }); }} />
                                                     </div>
                                                     <div className="flex items-center justify-end gap-2">
                                                         <button onClick={() => setSelectionMode(false)} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Close</button>
@@ -368,6 +474,47 @@ export default function ParlayProzInstance() {
                                                 </div>
                                             )}
                                         </div>
+                                        {/* Export Contacts (current filtered or selected) */}
+                                        <button
+                                            onClick={() => {
+                                                // Derive list: selected if selectionMode and some selected, else all filtered (sorted)
+                                                const base = (selectionMode && selectedIds.size > 0) ? sorted.filter(c => selectedIds.has(c.id)) : sorted;
+                                                const unique: Record<string, boolean> = {};
+                                                const lines: string[] = [];
+                                                base.forEach(c => {
+                                                    const phone = (c.phone || '').trim();
+                                                    if (!phone) return;
+                                                    const key = phone + '|' + (c.name || '');
+                                                    if (unique[key]) return; unique[key] = true;
+                                                    const safeName = (c.name || phone).replace(/\r|\n/g, ' ').trim();
+                                                    // Minimal vCard 3.0
+                                                    lines.push('BEGIN:VCARD');
+                                                    lines.push('VERSION:3.0');
+                                                    lines.push('FN:' + safeName);
+                                                    lines.push('N:' + safeName + ';;;;');
+                                                    lines.push('TEL;TYPE=CELL:' + phone.replace(/[^+0-9]/g, ''));
+                                                    if (c.firstCallStatus) lines.push('X-FIRST-CALL-STATUS:' + c.firstCallStatus);
+                                                    if (c.secondCallStatus) lines.push('X-SECOND-CALL-STATUS:' + c.secondCallStatus);
+                                                    if (c.finalStatus) lines.push('X-FINAL-STATUS:' + c.finalStatus);
+                                                    lines.push('END:VCARD');
+                                                });
+                                                if (!lines.length) {
+                                                    alert('No contacts with phone numbers to export.');
+                                                    return;
+                                                }
+                                                const blob = new Blob([lines.join('\n')], { type: 'text/vcard;charset=utf-8;' });
+                                                const url = URL.createObjectURL(blob);
+                                                const a = document.createElement('a');
+                                                a.href = url;
+                                                const ts = new Date().toISOString().slice(0, 10);
+                                                a.download = `contacts_${selectionMode && selectedIds.size ? 'selected' : 'filtered'}_${ts}.vcf`;
+                                                a.click();
+                                                setTimeout(() => URL.revokeObjectURL(url), 1500);
+                                            }}
+                                            disabled={sorted.length === 0}
+                                            className={`h-10 px-3 rounded-xl text-[11px] font-semibold bg-white/60 hover:bg-white ring-1 ring-white/70 disabled:opacity-40 disabled:cursor-not-allowed`}
+                                            style={{ color: '#1a1026' }}
+                                        >Export Contacts</button>
                                     </div>
                                 </>
                             )}
@@ -396,13 +543,27 @@ export default function ParlayProzInstance() {
                     <div className="rounded-3xl bg-white/60 backdrop-blur-xl ring-1 ring-white/60 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.1)] p-4 md:p-6 min-h-[40vh] transition">
                         {(() => {
                             const base = view === 'registered' ? sorted.filter(c => c.finalStatus === 'Registered') : sorted;
-                            if (view === 'table') return <CustomerTable leadNumbers={globalLeadNumbers} mode="compact" onOpenCustomer={(id) => setOpenCustomerId(id)} data={base} onUpdateCustomer={updateCustomer} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onVisibleIdsChange={() => { }} />;
+                            if (view === 'table') return <CustomerTable pageIndex={tablePageIndex} onPageIndexChange={setTablePageIndex} leadNumbers={globalLeadNumbers} mode="compact" onOpenCustomer={(id) => setOpenCustomerId(id)} data={base} onUpdateCustomer={updateCustomer} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} onVisibleIdsChange={() => { }} />;
                             if (view === 'cards') return <CustomerCards leadNumbers={globalLeadNumbers} data={base} onUpdateCustomer={updateCustomer} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} />;
                             if (view === 'grouped') return <CustomerCardsGrouped leadNumbers={globalLeadNumbers} data={base} onUpdateCustomer={updateCustomer} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} />;
                             if (view === 'registered') return <CustomerCards leadNumbers={globalLeadNumbers} data={base} onUpdateCustomer={updateCustomer} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelect} />;
                             if (view === 'kanban') return <KanbanPipeline leadNumbers={globalLeadNumbers} data={base} onUpdateCustomer={updateCustomer} selectedIds={selectedIds} onToggleSelect={toggleSelect} onOpen={(id) => setOpenCustomerId(id)} />;
-                            if (view === 'analytics') return <AnalyticsOverview data={sorted} />;
-                            if (view === 'settings') return <SettingsPanel theme={theme} presets={presets} setPreset={setPreset} updateTheme={updateTheme} customStatusColors={customStatusColors} updateStatusColor={updateStatusColor} exportTheme={exportTheme} importTheme={importTheme}
+                            if (view === 'analytics') return (
+                                <div className="space-y-4">
+                                    {(remoteCount !== undefined && remoteCount !== customers.length) && (
+                                        <div className="text-[11px] font-medium px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-700">
+                                            Cloud shows <strong>{remoteCount}</strong> records; local session has <strong>{customers.length}</strong>. Displaying merged view (max). Force Sync ensures local-only rows push up.
+                                        </div>
+                                    )}
+                                    {uniquePhoneCount !== customers.length && (
+                                        <div className="text-[11px] font-medium px-3 py-2 rounded-lg bg-blue-50 border border-blue-200 text-blue-700">
+                                            {customers.length - uniquePhoneCount} duplicate phone entr{customers.length - uniquePhoneCount === 1 ? 'y' : 'ies'} detected (after merges). Totals count individual rows; analytics may later switch to unique leads.
+                                        </div>
+                                    )}
+                                    <AnalyticsOverview data={customers} remoteCount={remoteCount} localCount={customers.length} uniquePhoneCount={uniquePhoneCount} />
+                                </div>
+                            );
+                            if (view === 'settings') return <SettingsPanel theme={theme} presets={presets} setPreset={setPreset} updateTheme={updateTheme} customStatusColors={customStatusColors} updateStatusColor={updateStatusColorRemoteAware} regenerateStatusColors={regenerateStatusPalette} exportTheme={exportTheme} importTheme={importTheme} forceSync={forceSync} customersForExport={customers}
                                 brandName={brandName} setBrandName={setBrandName}
                                 brandLogoHorizontal={brandLogoHorizontal} setBrandLogoHorizontal={setBrandLogoHorizontal}
                                 brandLogoVertical={brandLogoVertical} setBrandLogoVertical={setBrandLogoVertical}
@@ -436,44 +597,81 @@ function Metric({ label, value, formatter }: { label: string; value: number; for
 }
 
 // Main Dashboard panel with goal tracking & progress analytics lite
-function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics: any }) {
-    // Initialize with neutral values (avoid SSR vs client mismatch); load persisted values after mount
+interface MetricsShape { total: number; registered: number }
+function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics: MetricsShape }) {
+    // Remote goals & affirmation (Convex) migration
+    const { goals: remoteGoals, setGoals } = useGoals();
+    const defaultAffirmation = "I AM SO HAPPY AND GRATEFUL NOW THAT PALI PROS HAS 10,000 ACTIVE MEMBERS GOING STRONG AND ONLY INCREASING."; // quotes escaped OK
+    // Local working state (mirrors remote; no localStorage persistence anymore)
     const [goalChiefAim, setGoalChiefAim] = useState<number>(0);
     const [goalSweetSpot, setGoalSweetSpot] = useState<number>(0);
     const [goalWin, setGoalWin] = useState<number>(0);
-    const [goalPresets, setGoalPresets] = useState<{ name: string; value: number }[]>([]);
-    const [hydratedGoals, setHydratedGoals] = useState(false);
-    useEffect(() => {
-        try {
-            // Migration: legacy single goal
-            const legacy = localStorage.getItem('pp_goal_registered');
-            const chief = localStorage.getItem('pp_goal_chief');
-            const sweet = localStorage.getItem('pp_goal_sweet');
-            const win = localStorage.getItem('pp_goal_win');
-            if (chief) setGoalChiefAim(Number(chief) || 0); else if (legacy) setGoalChiefAim(Number(legacy) || 0);
-            if (sweet) setGoalSweetSpot(Number(sweet) || 0);
-            if (win) setGoalWin(Number(win) || 0);
-            const rawPresets = localStorage.getItem('pp_goal_presets');
-            if (rawPresets) setGoalPresets(JSON.parse(rawPresets));
-        } catch { }
-        setHydratedGoals(true);
-    }, []);
-    // Chief affirmation (editable ribbon) persistence
-    const defaultAffirmation = "I AM SO HAPPY AND GRATEFUL NOW THAT PALI PROS HAS 10,000 ACTIVE MEMBERS GOING STRONG AND ONLY INCREASING.";
+    const [goalPresets, setGoalPresets] = useState<{ id?: string; name: string; value: number }[]>([]);
     const [affirmation, setAffirmation] = useState<string>(defaultAffirmation);
+    const migratedRef = useRef(false);
+    const hydratedRef = useRef(false);
+    // When remote goals load, hydrate local OR bootstrap from legacy localStorage once if remote empty
     useEffect(() => {
-        try {
-            const stored = localStorage.getItem('pp_goal_chief_affirmation');
-            if (stored && stored.trim()) setAffirmation(stored);
-        } catch { }
-    }, []);
-    useEffect(() => { try { localStorage.setItem('pp_goal_chief_affirmation', affirmation); } catch { } }, [affirmation]);
-    const [newPresetName, setNewPresetName] = useState('');
-    const [newPresetValue, setNewPresetValue] = useState('');
-    useEffect(() => { try { localStorage.setItem('pp_goal_chief', String(goalChiefAim || 0)); } catch { } }, [goalChiefAim]);
-    useEffect(() => { try { localStorage.setItem('pp_goal_sweet', String(goalSweetSpot || 0)); } catch { } }, [goalSweetSpot]);
-    useEffect(() => { try { localStorage.setItem('pp_goal_win', String(goalWin || 0)); } catch { } }, [goalWin]);
-    useEffect(() => { try { localStorage.setItem('pp_goal_presets', JSON.stringify(goalPresets)); } catch { } }, [goalPresets]);
+        if (remoteGoals === undefined) return; // still loading
+        if (hydratedRef.current) return; // already hydrated
+        if (remoteGoals) {
+            setGoalChiefAim(remoteGoals.chiefAim || 0);
+            setGoalSweetSpot(remoteGoals.sweetSpot || 0);
+            setGoalWin(remoteGoals.win || 0);
+            setGoalPresets((remoteGoals.presets || []).map(p => ({ ...p })));
+            setAffirmation(remoteGoals.affirmation || defaultAffirmation);
+            hydratedRef.current = true;
+            return;
+        }
+        // Remote null: attempt one‑time legacy bootstrap from localStorage (migration) then push
+        if (!migratedRef.current) {
+            let chief = 0, sweet = 0, win = 0; let presets: { id?: string; name: string; value: number }[] = []; let aff = defaultAffirmation;
+            try {
+                const legacyChief = localStorage.getItem('pp_goal_chief') || localStorage.getItem('pp_goal_registered');
+                const legacySweet = localStorage.getItem('pp_goal_sweet');
+                const legacyWin = localStorage.getItem('pp_goal_win');
+                if (legacyChief) chief = Number(legacyChief) || 0;
+                if (legacySweet) sweet = Number(legacySweet) || 0;
+                if (legacyWin) win = Number(legacyWin) || 0;
+                const rawPresets = localStorage.getItem('pp_goal_presets');
+                if (rawPresets) {
+                    try {
+                        const arr = JSON.parse(rawPresets);
+                        if (Array.isArray(arr)) {
+                            type LegacyPreset = { id?: string; name?: unknown; value?: unknown };
+                            presets = (arr as LegacyPreset[])
+                                .filter(p => p && typeof p.name === 'string' && typeof p.value === 'number')
+                                .map(p => ({ id: p.id, name: p.name as string, value: p.value as number }));
+                        }
+                    } catch { }
+                }
+                const legacyAff = localStorage.getItem('pp_goal_chief_affirmation');
+                if (legacyAff && legacyAff.trim()) aff = legacyAff;
+            } catch { }
+            setGoalChiefAim(chief); setGoalSweetSpot(sweet); setGoalWin(win); setGoalPresets(presets); setAffirmation(aff || defaultAffirmation);
+            setGoals({ chiefAim: chief, sweetSpot: sweet, win, affirmation: aff || defaultAffirmation, presets: presets.map(p => ({ id: p.id || p.name, name: p.name, value: p.value })) }).catch(() => { });
+            migratedRef.current = true; hydratedRef.current = true;
+        }
+    }, [remoteGoals, setGoals, defaultAffirmation]);
+    // Debounced remote persistence of edits (skip until hydrated)
+    const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+        if (!hydratedRef.current) return; // don't save until we've hydrated
+        if (remoteGoals === undefined) return; // loading
+        if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+        saveDebounceRef.current = setTimeout(() => {
+            setGoals({
+                chiefAim: goalChiefAim,
+                sweetSpot: goalSweetSpot,
+                win: goalWin,
+                affirmation,
+                presets: goalPresets.map(p => ({ id: p.id || p.name, name: p.name, value: p.value }))
+            }).catch(() => { /* silent for now */ });
+        }, 600);
+        return () => { if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current); };
+    }, [goalChiefAim, goalSweetSpot, goalWin, affirmation, goalPresets, setGoals, remoteGoals]);
+    // Simple preset add helper (future UI could hook in)
+    // removed unused addPreset helper
     const registered = metrics.registered ?? customers.filter(c => c.finalStatus === 'Registered').length;
     const progressChief = goalChiefAim > 0 ? Math.min(1, registered / goalChiefAim) : 0;
     const progressSweet = goalSweetSpot > 0 ? Math.min(1, registered / goalSweetSpot) : 0;
@@ -481,12 +679,12 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
     // Anchor 'now' post-mount to prevent SSR/client date divergence (hydration mismatch)
     const [now, setNow] = useState<Date | null>(null);
     useEffect(() => { setNow(new Date()); }, []);
-    const todayRef = now || new Date('2000-01-01'); // placeholder stable on server
+    // Stable today reference (memoized) so exhaustive-deps does not complain
+    // removed todayRef (was previously used to stabilize date calculations)
     const isISO = (s?: string) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
     const recent7 = useMemo(() => {
         if (!now) return [] as { date: string; count: number }[]; // defer until hydrated
-        // Aggregate registrations by date (last 7 days)
-        const today = todayRef;
+        const today = now; // use now directly; todayRef adds no value
         const days: { date: string; count: number }[] = [];
         for (let i = 6; i >= 0; i--) {
             const d = new Date(today); d.setDate(d.getDate() - i);
@@ -505,7 +703,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
     // 30 day cumulative + daily leads vs regs
     const last30 = useMemo(() => {
         if (!now) return [] as { date: string; leads: number; regs: number; cumulativeRegs: number }[];
-        const today = todayRef;
+        const today = now;
         const arr: { date: string; leads: number; regs: number; cumulativeRegs: number }[] = [];
         for (let i = 29; i >= 0; i--) {
             const d = new Date(today); d.setDate(d.getDate() - i); const key = d.toISOString().slice(0, 10);
@@ -527,7 +725,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
         const dailyAvg = recentRegs / 14 || 0;
         if (!dailyAvg) return 0; return Math.ceil((goalChiefAim - registered) / dailyAvg);
     }, [goalChiefAim, registered, last30]);
-    const targetDate = projectedDays ? new Date(Date.now() + projectedDays * 86400000).toISOString().slice(0, 10) : null;
+    // const targetDate = projectedDays ? new Date(Date.now() + projectedDays * 86400000).toISOString().slice(0, 10) : null; // (unused)
     // Milestones for chief aim
     const milestonesChief = useMemo(() => goalChiefAim > 0 ? [0.25, 0.5, 0.75, 1].map(r => ({ ratio: r, value: Math.round(goalChiefAim * r), reached: registered >= goalChiefAim * r })) : [], [goalChiefAim, registered]);
     // Cohort retention (weekly)
@@ -535,8 +733,8 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
         if (!now) return [] as { weekStart: string; total: number; registered: number; rate: number }[];
         const map: Record<string, { total: number; registered: number }> = {};
         customers.forEach(c => {
-            if (!isISO(c.dateAdded)) return; const d = new Date(c.dateAdded + 'T00:00:00'); if (isNaN(d.getTime())) return; const day = d.getDay(); // 0 Sun
-            const diff = (day + 6) % 7; // convert to Monday-based index
+            if (!isISO(c.dateAdded)) return; const d = new Date(c.dateAdded + 'T00:00:00'); if (isNaN(d.getTime())) return; const day = d.getDay();
+            const diff = (day + 6) % 7; // Monday-based
             d.setDate(d.getDate() - diff); const key = d.toISOString().slice(0, 10);
             if (!map[key]) map[key] = { total: 0, registered: 0 };
             map[key].total++; if (c.finalStatus === 'Registered') map[key].registered++;
@@ -554,7 +752,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
     const activityTimeline = useMemo(() => {
         if (!now) return [] as { date: string; newLeads: number; firstStatuses: number; finals: number }[];
         const days: { date: string; newLeads: number; firstStatuses: number; finals: number }[] = [];
-        const today = todayRef;
+        const today = now;
         for (let i = 13; i >= 0; i--) { const d = new Date(today); d.setDate(d.getDate() - i); const key = d.toISOString().slice(0, 10); days.push({ date: key, newLeads: 0, firstStatuses: 0, finals: 0 }); }
         customers.forEach(c => {
             if (isISO(c.dateAdded)) { const rec = days.find(d => d.date === c.dateAdded); if (rec) rec.newLeads++; }
@@ -566,7 +764,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
     // Daily call progress metrics (assumptive logic due to absence of explicit scheduling fields)
     const dailyCallProgress = useMemo(() => {
         if (!now) return null;
-        const todayKey = todayRef.toISOString().slice(0, 10);
+        const todayKey = now.toISOString().slice(0, 10);
         const isValid = (d?: string) => !!d && /^\d{4}-\d{2}-\d{2}$/.test(d);
         const newLeadsToday = customers.filter(c => c.dateAdded === todayKey).length;
         const firstCallsToday = customers.filter(c => c.firstCallDate === todayKey && c.firstCallStatus).length;
@@ -622,7 +820,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
                                     <ProgressMini label="Sweet" progress={progressSweet} colorFrom="var(--brand-via)" colorTo="var(--brand-to)" />
                                     <ProgressMini label="Chief" progress={progressChief} colorFrom="var(--brand-from)" colorTo="var(--brand-via)" />
                                 </div>
-                                {goalChiefAim > 0 && projectedDays > 0 && <p className="text-[10px]" style={{ color: 'var(--brand-text-secondary)' }}>At your 14‑day pace you may hit chief aim in <strong>{projectedDays}d</strong>.</p>}
+                                {goalChiefAim > 0 && projectedDays > 0 && <p className="text-[10px]" style={{ color: 'var(--brand-text-secondary)' }}>At your 14-day pace you may hit chief aim in <strong>{projectedDays}d</strong>.</p>}
                                 {goalChiefAim > 0 && (
                                     <div className="mt-1 w-full h-3 rounded-full relative overflow-hidden" style={{ background: 'var(--brand-muted-bg)', border: '1px solid var(--brand-border)' }}>
                                         <div className="absolute inset-y-0 left-0" style={{ width: `${progressChief * 100}%`, background: 'linear-gradient(90deg,var(--brand-from),var(--brand-to))' }} />
@@ -660,7 +858,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
                         <DashStat label="Total Call Touches" value={dailyCallProgress.totalCallTouchesToday} />
                         <DashStat label="Registered" value={registered} compact />
                     </div>
-                    <p className="text-[10px] font-medium" style={{ color: 'var(--brand-text-secondary)' }}>Heuristic: "To Call Today" counts leads without a completed final status that are awaiting their next call step. Adjust logic later when explicit scheduling fields are added.</p>
+                    <p className="text-[10px] font-medium" style={{ color: 'var(--brand-text-secondary)' }}>Heuristic: &quot;To Call Today&quot; counts leads without a completed final status that are awaiting their next call step. Adjust logic later when explicit scheduling fields are added.</p>
                 </div>
             )}
             {/* Defer charts until hydrated to avoid mismatches */}
@@ -978,17 +1176,17 @@ function RadialProgress({ size, stroke, progress, label, subtitle, id, gradientS
 
 function MultiGoalRadials({ progressChief, progressSweet, progressWin }: { progressChief: number; progressSweet: number; progressWin: number }) {
     // Vertical stack with decorative connectors; smaller (Win) -> medium (Sweet) -> large (Chief)
-    const winStops = [
+    const winStops: { offset: string; color: string }[] = [
         { offset: '0%', color: '#0d9488' },
         { offset: '55%', color: '#14b8a6' },
         { offset: '100%', color: '#10b981' },
     ];
-    const sweetStops = [
+    const sweetStops: { offset: string; color: string }[] = [
         { offset: '0%', color: '#f59e0b' },
         { offset: '50%', color: '#f97316' },
         { offset: '100%', color: '#ec4899' },
     ];
-    const chiefStops = [
+    const chiefStops: { offset: string; color: string }[] = [
         { offset: '0%', color: 'var(--brand-from)' },
         { offset: '50%', color: 'var(--brand-via)' },
         { offset: '100%', color: 'var(--brand-to)' },
@@ -1026,7 +1224,31 @@ function BulkBtn({ label, onClick }: { label: string; onClick: () => void }) {
     );
 }
 
-function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusColors, updateStatusColor, exportTheme, importTheme, brandName, setBrandName,
+interface SettingsPanelProps {
+    theme: BrandTheme;
+    presets: Record<string, BrandTheme>;
+    setPreset: (k: string) => void;
+    updateTheme: (p: Partial<BrandTheme>) => void;
+    customStatusColors: Record<string, string>;
+    updateStatusColor: (k: string, v: string) => void;
+    regenerateStatusColors: () => void;
+    exportTheme: () => void;
+    importTheme: (f: File) => void;
+    forceSync: () => Promise<{ added: number; skipped: number }>;
+    brandName: string; setBrandName: (v: string) => void;
+    brandLogoHorizontal: string; setBrandLogoHorizontal: (v: string) => void;
+    brandLogoVertical: string; setBrandLogoVertical: (v: string) => void;
+    brandLogoIcon: string; setBrandLogoIcon: (v: string) => void;
+    brandLogoVariant: 'horizontal' | 'vertical' | 'icon' | 'icon-text' | 'text'; setBrandLogoVariant: (v: 'horizontal' | 'vertical' | 'icon' | 'icon-text' | 'text') => void;
+    brandLogoSize: number; setBrandLogoSize: (v: number | ((prev: number) => number)) => void;
+    brandFavicon: string; setBrandFavicon: (v: string) => void;
+    domainPrimary: string; setDomainPrimary: (v: string) => void;
+    domainLanding: string; setDomainLanding: (v: string) => void;
+    domainFormEndpoint: string; setDomainFormEndpoint: (v: string) => void;
+    domainApiBase: string; setDomainApiBase: (v: string) => void;
+    customersForExport: Customer[];
+}
+function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusColors, updateStatusColor, regenerateStatusColors, exportTheme, importTheme, forceSync, brandName, setBrandName,
     brandLogoHorizontal, setBrandLogoHorizontal,
     brandLogoVertical, setBrandLogoVertical,
     brandLogoIcon, setBrandLogoIcon,
@@ -1036,7 +1258,18 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
     domainPrimary, setDomainPrimary,
     domainLanding, setDomainLanding,
     domainFormEndpoint, setDomainFormEndpoint,
-    domainApiBase, setDomainApiBase }: any) {
+    domainApiBase, setDomainApiBase,
+    // Added customers for export
+    customersForExport }: SettingsPanelProps) {
+    // Convex mutations for importing leads
+    const bulkUpsert = useMutation(api.customers.bulkUpsert);
+    const dedupePhonesMutation = useMutation(api.customers.dedupePhones as unknown as typeof api.customers.dedupePhones);
+    const [importSource, setImportSource] = useState<string>('');
+    const [importing, setImporting] = useState(false);
+    const [importResult, setImportResult] = useState<null | { rows: number; merged: number; removed: number; created: number; updated: number }>(null);
+    const [treatDuplicateLeadIdsAsUpdates, setTreatDuplicateLeadIdsAsUpdates] = useState(true);
+    // Local force sync status (parent only supplies the function)
+    const [forceSyncStatus, setForceSyncStatus] = useState<{ running: boolean; msg: string | null }>({ running: false, msg: null });
     const sections: { key: string; label: string; description?: string }[] = [
         { key: 'identity', label: 'Brand Identity', description: 'Name, logo & favicon' },
         { key: 'domains', label: 'Domains', description: 'Primary & landing URLs' },
@@ -1112,8 +1345,8 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                             <div className="flex items-center justify-between">
                                                 <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Header Logo Size</div>
                                                 <div className="flex items-center gap-1">
-                                                    <button type="button" onClick={() => setBrandLogoSize((s: number) => Math.max(0.4, +(s - 0.1).toFixed(2)))} className="px-2 h-8 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60" style={{ color: accentColor }}>-</button>
-                                                    <button type="button" onClick={() => setBrandLogoSize((s: number) => Math.min(2, +(s + 0.1).toFixed(2)))} className="px-2 h-8 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60" style={{ color: accentColor }}>+</button>
+                                                    <button type="button" onClick={() => setBrandLogoSize(Math.max(0.4, +(brandLogoSize - 0.1).toFixed(2)))} className="px-2 h-8 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60" style={{ color: accentColor }}>-</button>
+                                                    <button type="button" onClick={() => setBrandLogoSize(Math.min(2, +(brandLogoSize + 0.1).toFixed(2)))} className="px-2 h-8 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60" style={{ color: accentColor }}>+</button>
                                                 </div>
                                             </div>
                                             <input type="range" min={0.4} max={2} step={0.1} value={brandLogoSize} onChange={e => setBrandLogoSize(parseFloat(e.target.value))} className="w-full accent-[var(--brand-from)]" />
@@ -1127,6 +1360,7 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                         <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Favicon (PNG)</div>
                                         <div className="flex items-center gap-4 flex-wrap">
                                             <div className="w-14 h-14 rounded-xl bg-white/70 ring-1 ring-white/60 flex items-center justify-center overflow-hidden relative">
+                                                {/* eslint-disable-next-line @next/next/no-img-element */}
                                                 {brandFavicon ? <img src={brandFavicon} alt="Favicon" className="object-contain max-w-full max-h-full" /> : <span className="text-[9px] font-medium opacity-60">None</span>}
                                             </div>
                                             <div className="flex flex-col gap-2">
@@ -1143,7 +1377,9 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                         <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Preview</div>
                                         <div className="flex items-center gap-4">
                                             <div className="h-12 w-12 rounded-xl flex items-center justify-center overflow-hidden">
+                                                {/* eslint-disable-next-line @next/next/no-img-element */}
                                                 {brandLogoVariant === 'icon-text' && brandLogoIcon && <img src={brandLogoIcon} alt="Icon" className="object-contain max-w-full max-h-full" />}
+                                                {/* eslint-disable-next-line @next/next/no-img-element */}
                                                 {brandLogoVariant !== 'text' && brandLogoVariant !== 'icon-text' && (() => { const map: Record<string, string> = { horizontal: brandLogoHorizontal, vertical: brandLogoVertical, icon: brandLogoIcon }; const src = map[brandLogoVariant]; if (src) return <img src={src} alt="Logo" className="object-contain max-w-full max-h-full" />; return <span className="text-[10px] font-bold opacity-70" style={{ color: accentColor }}>Logo</span>; })()}
                                                 {(brandLogoVariant === 'text' || (brandLogoVariant === 'icon-text' && !brandLogoIcon)) && <span className="text-[10px] font-bold opacity-70" style={{ color: accentColor }}>Logo</span>}
                                             </div>
@@ -1155,6 +1391,7 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                         </div>
                                         <div className="flex items-center gap-3">
                                             <span className="w-5 h-5 rounded bg-white/80 ring-1 ring-white/60 overflow-hidden">
+                                                {/* eslint-disable-next-line @next/next/no-img-element */}
                                                 {brandFavicon ? <img src={brandFavicon} alt="Fav" className="object-contain max-w-full max-h-full" /> : <span className="block text-[8px] font-semibold text-center mt-[3px]" style={{ color: accentColor }}>F</span>}
                                             </span>
                                             <span className="text-[11px] font-medium" style={{ color: accentColor }}>Browser Tab Preview</span>
@@ -1169,58 +1406,155 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                     </div>
                 )}
                 {active === 'brand' && (
-                    <div className="space-y-8">
+                    <div className="space-y-10">
                         <div>
                             <h2 className="text-sm font-extrabold uppercase tracking-[0.18em] mb-4" style={{ color: accentColor }}>Brand Colors</h2>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                <ColorInput accentColor={accentColor} label="Gradient From" value={theme.from} onChange={v => updateTheme({ from: v })} />
-                                <ColorInput accentColor={accentColor} label="Gradient Via" value={theme.via} onChange={v => updateTheme({ via: v })} />
-                                <ColorInput accentColor={accentColor} label="Gradient To" value={theme.to} onChange={v => updateTheme({ to: v })} />
-                                <ColorInput accentColor={accentColor} label="Background" value={theme.background} onChange={v => updateTheme({ background: v })} />
-                                <ColorInput accentColor={accentColor} label="Sidebar Text" value={theme.sidebarText} onChange={v => updateTheme({ sidebarText: v })} />
-                                <ColorInput accentColor={accentColor} label="Header Text" value={theme.headerText} onChange={v => updateTheme({ headerText: v })} />
-                                <ColorInput accentColor={accentColor} label="Primary Text" value={theme.primaryText} onChange={v => updateTheme({ primaryText: v })} />
-                                <ColorInput accentColor={accentColor} label="Secondary Text" value={theme.secondaryText} onChange={v => updateTheme({ secondaryText: v })} />
-                                <ColorInput accentColor={accentColor} label="Border" value={theme.border} onChange={v => updateTheme({ border: v })} />
-                                <ColorInput accentColor={accentColor} label="Card BG" value={theme.cardBg} onChange={v => updateTheme({ cardBg: v })} />
-                                <ColorInput accentColor={accentColor} label="Muted BG" value={theme.mutedBg} onChange={v => updateTheme({ mutedBg: v })} />
-                            </div>
-                            <div className="mt-6 flex flex-wrap gap-3 items-center">
-                                {Object.entries(presets).map(([k, p]) => {
-                                    const preset = p as any as { from: string; via: string; to: string };
-                                    return (
-                                        <button key={k} onClick={() => setPreset(k)} className="px-3 py-2 rounded-xl text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60 flex items-center gap-2">
-                                            <span className="w-5 h-5 rounded-full bg-gradient-to-r" style={{ backgroundImage: `linear-gradient(to right, ${preset.from}, ${preset.via}, ${preset.to})` }} />
-                                            {k}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                            <ColorSuggestions base={theme.from} onPick={(role, color) => {
-                                if (role === 'from') updateTheme({ from: color });
-                                if (role === 'via') updateTheme({ via: color });
-                                if (role === 'to') updateTheme({ to: color });
-                                if (role === 'background') updateTheme({ background: color });
-                                if (role === 'border') updateTheme({ border: color });
-                                if (role === 'card') updateTheme({ cardBg: color });
-                                if (role === 'muted') updateTheme({ mutedBg: color });
-                                if (role === 'primaryText') updateTheme({ primaryText: color });
-                                if (role === 'secondaryText') updateTheme({ secondaryText: color });
-                            }} />
-                            <StatusColorEditors customStatusColors={customStatusColors} updateStatusColor={updateStatusColor} />
-                            <ThemeIO exportTheme={exportTheme} importTheme={importTheme} />
-                            <div className="mt-8 p-5 rounded-2xl bg-white/70 ring-1 ring-white/60">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide mb-3" style={{ color: accentColor }}>Preview</div>
-                                <div className="flex flex-wrap items-center gap-4">
-                                    <span className="text-lg font-black bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-transparent bg-clip-text">Gradient Text</span>
-                                    <button className="px-4 h-10 rounded-xl text-[12px] font-semibold text-white bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] shadow">Primary Button</button>
-                                    <span className="px-3 py-1 rounded-full text-[10px] font-semibold bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white shadow">Chip</span>
+                            <p className="text-[11px] font-medium mb-6 max-w-2xl" style={{ color: accentColor, opacity: .8 }}>Customize your core gradient, surfaces, and text palette. Changes sync locally immediately and remotely shortly after preset selection. Status (badge) colors can be regenerated from the gradient or fine‑tuned below.</p>
+                            <div className="grid gap-8 lg:grid-cols-3">
+                                <div className="space-y-6">
+                                    <div>
+                                        <div className="text-[10px] font-semibold uppercase tracking-wide mb-3" style={{ color: accentColor }}>Gradient Stops</div>
+                                        <div className="grid grid-cols-3 gap-4">
+                                            {(['from', 'via', 'to'] as const).map(stop => {
+                                                const current = theme[stop];
+                                                return (
+                                                    <label key={stop} className="flex flex-col gap-1 text-[10px] font-semibold" style={{ color: accentColor }}>
+                                                        {stop.toUpperCase()}
+                                                        <input type="color" value={current} onChange={e => updateTheme({ [stop]: e.target.value })} className="h-12 w-full rounded-lg cursor-pointer bg-transparent border border-white/60" />
+                                                        <input value={current} onChange={e => updateTheme({ [stop]: e.target.value })} className="h-9 px-2 rounded-lg bg-white/70 ring-1 ring-white/60 text-[11px] font-medium" />
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div className="text-[10px] font-semibold uppercase tracking-wide mb-3" style={{ color: accentColor }}>Surface & Text</div>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            {([
+                                                ['background', 'Background'],
+                                                ['cardBg', 'Card BG'],
+                                                ['mutedBg', 'Muted BG'],
+                                                ['border', 'Border'],
+                                                ['primaryText', 'Primary Text'],
+                                                ['secondaryText', 'Secondary Text'],
+                                                ['sidebarText', 'Sidebar Text'],
+                                                ['headerText', 'Header Text']
+                                            ] as const).map(([key, label]) => {
+                                                const value = theme[key as keyof BrandTheme] as string;
+                                                return (
+                                                    <label key={key} className="flex flex-col gap-1 text-[10px] font-semibold" style={{ color: accentColor }}>
+                                                        {label}
+                                                        <div className="flex items-center gap-2">
+                                                            <input type="color" value={value} onChange={e => updateTheme({ [key]: e.target.value })} className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border border-white/60" />
+                                                            <input value={value} onChange={e => updateTheme({ [key]: e.target.value })} className="flex-1 h-9 px-2 rounded-lg bg-white/70 ring-1 ring-white/60 text-[11px] font-medium" />
+                                                        </div>
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                    <div className="space-y-3">
+                                        <div className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Presets</div>
+                                        <div className="flex flex-wrap gap-2">
+                                            {Object.keys(presets).map(k => {
+                                                const activePreset = theme.key === k;
+                                                return (
+                                                    <button key={k} type="button" onClick={() => setPreset(k)}
+                                                        className={`px-3 h-9 rounded-xl text-[11px] font-semibold ring-1 transition ${activePreset ? 'ring-transparent shadow bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white' : 'bg-white/70 hover:bg-white ring-white/60'}`}
+                                                        style={!activePreset ? { color: accentColor } : undefined}
+                                                    >{k}</button>
+                                                );
+                                            })}
+                                        </div>
+                                        <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Selecting a preset replaces current values; you can still tweak after applying.</div>
+                                    </div>
+                                </div>
+                                <div className="space-y-6 col-span-2">
+                                    <div className="p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 space-y-5">
+                                        <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Status / Badge Colors</div>
+                                            <div className="flex items-center gap-2">
+                                                <button type="button" onClick={regenerateStatusColors} className="px-3 h-9 rounded-xl text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60" style={{ color: accentColor }}>Regenerate</button>
+                                            </div>
+                                        </div>
+                                        <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                                            {(['Interested', 'Answered', 'Voicemail', 'They Called', 'We Called', 'Registered', 'Follow-up Needed', 'Not Registered'] as const).map(s => {
+                                                const val = customStatusColors[s] || '#cccccc';
+                                                return (
+                                                    <label key={s} className="flex flex-col gap-1 text-[10px] font-semibold" style={{ color: accentColor }}>
+                                                        <span className="truncate" title={s}>{s}</span>
+                                                        <div className="flex items-center gap-2">
+                                                            <input type="color" value={val} onChange={e => updateStatusColor(s, e.target.value)} className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border border-white/60" />
+                                                            <input value={val} onChange={e => updateStatusColor(s, e.target.value)} className="flex-1 h-9 px-2 rounded-lg bg-white/70 ring-1 ring-white/60 text-[11px] font-medium" />
+                                                        </div>
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
+                                        <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Regenerate uses your gradient to derive a palette. Fine‑tune any individual color afterward.</div>
+                                    </div>
+                                    <div className="p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 space-y-4">
+                                        <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Theme Export / Import</div>
+                                        <div className="flex flex-wrap gap-3 items-center">
+                                            <button type="button" onClick={exportTheme} className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60">Export JSON</button>
+                                            <label className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60 flex items-center gap-2 cursor-pointer">Import
+                                                <input type="file" accept="application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importTheme(f); }} />
+                                            </label>
+                                            <button type="button" onClick={regenerateStatusColors} className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/60 hover:bg-white ring-1 ring-white/60">Rebuild Status Palette</button>
+                                        </div>
+                                        <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Export creates a downloadable JSON containing theme + status colors. Import will overwrite current values.</div>
+                                    </div>
+                                    <div className="p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 space-y-4">
+                                        <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Live Preview</div>
+                                        <div className="rounded-xl p-6 border" style={{ background: 'linear-gradient(90deg,' + theme.from + ',' + theme.via + ',' + theme.to + ')', borderColor: theme.border }}>
+                                            {(() => {
+                                                const hexes = [theme.from, theme.via, theme.to].filter(h => /^#([0-9a-fA-F]{6})$/.test(h));
+                                                const luminance = (h: string) => {
+                                                    const r = parseInt(h.slice(1, 3), 16) / 255;
+                                                    const g = parseInt(h.slice(3, 5), 16) / 255;
+                                                    const b = parseInt(h.slice(5, 7), 16) / 255;
+                                                    const toLin = (c: number) => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+                                                    const R = toLin(r), G = toLin(g), B = toLin(b);
+                                                    return 0.2126 * R + 0.7152 * G + 0.0722 * B;
+                                                };
+                                                const avgLum = hexes.length ? hexes.reduce((a, h) => a + luminance(h), 0) / hexes.length : 0.5;
+                                                const contrastColor = avgLum < 0.5 ? '#FFFFFF' : '#1a1026';
+                                                const shadow = avgLum < 0.5 ? '0 1px 2px rgba(0,0,0,0.5)' : undefined;
+                                                return (
+                                                    <>
+                                                        <div className="font-black text-lg mb-1" style={{ color: contrastColor, textShadow: shadow }}>Brand Gradient</div>
+                                                        <div className="text-[11px] font-medium max-w-sm" style={{ color: contrastColor, textShadow: shadow, opacity: .9 }}>This gradient powers emphasis elements across the dashboard (buttons, highlights, headers).</div>
+                                                    </>
+                                                );
+                                            })()}
+                                        </div>
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                            {([
+                                                ['background', 'App BG'],
+                                                ['cardBg', 'Card BG'],
+                                                ['mutedBg', 'Muted BG'],
+                                                ['border', 'Border'],
+                                                ['primaryText', 'Primary'],
+                                                ['secondaryText', 'Secondary'],
+                                                ['sidebarText', 'Sidebar'],
+                                                ['headerText', 'Header']
+                                            ] as const).map(([key, label]) => {
+                                                const value = theme[key as keyof BrandTheme] as string;
+                                                return (
+                                                    <div key={key} className="rounded-xl p-3 text-[10px] font-semibold ring-1 ring-white/60" style={{ background: value, color: key.includes('Text') ? value : accentColor }}>
+                                                        <div className="opacity-70 mb-1" style={{ color: accentColor }}>{label}</div>
+                                                        <div className="text-[9px] font-medium break-all" style={{ color: accentColor }}>{value}</div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    // ...existing code...
                 )}
+                {/* (Duplicate brand section removed) */}
                 {active === 'domains' && (
                     <div className="space-y-8">
                         <div>
@@ -1261,21 +1595,181 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                 {active === 'import' && (
                     <div className="space-y-6">
                         <h2 className="text-sm font-extrabold uppercase tracking-[0.18em]" style={{ color: accentColor }}>Import CSV</h2>
-                        <p className="text-[11px] font-medium" style={{ color: accentColor, opacity: .85 }}>Upload a CSV of leads to extend your database. (Mapping & validation coming soon.)</p>
-                        <label className="flex flex-col items-center justify-center gap-3 h-52 border-2 border-dashed rounded-2xl cursor-pointer bg-white/60 ring-1 ring-white/60 hover:bg-white transition">
+                        <p className="text-[11px] font-medium" style={{ color: accentColor, opacity: .85 }}>Upload a CSV of leads. You can optionally force all rows to a single Source below. After import duplicates (same phone) are auto merged.</p>
+                        <div className="flex flex-wrap items-center gap-4 text-[11px] font-medium">
+                            <div className="flex items-center gap-2">
+                                <span style={{ color: accentColor }} className="font-semibold uppercase tracking-wide">Override Source</span>
+                                <select value={importSource} onChange={e => setImportSource(e.target.value)} className="h-10 px-2 rounded-xl bg-white/70 ring-1 ring-white/60 text-[11px] font-semibold">
+                                    <option value=''>-- Keep From File --</option>
+                                    {SOURCE_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                            </div>
+                            <label className="flex items-center gap-2 select-none">
+                                <input type="checkbox" checked={treatDuplicateLeadIdsAsUpdates} onChange={e => setTreatDuplicateLeadIdsAsUpdates(e.target.checked)} className="accent-[var(--brand-from)]" />
+                                <span className="text-[10px] font-semibold" style={{ color: accentColor }}>Duplicate Lead ID = Update (uncheck to force new IDs)</span>
+                            </label>
+                            <button type="button" onClick={() => {
+                                // Generate template CSV
+                                const headers = [
+                                    'Lead ID', 'Customer Name', 'Contact Info', 'Source (Facebook/Instagram/WhatsApp/TikTok)', 'Date Entered', 'Date First Called', 'First Call Status (Voicemail/Answered/Interested/Not Interested)', 'Notes from First Call', 'Date Second Call', 'Second Call Status (They Called/We Called/Voicemail/Answered)', 'Second Call Notes', 'Date Registered', 'Final Status (Registered/Not Registered/Follow-up Needed)', 'Final Notes'
+                                ];
+                                const sample = [
+                                    '123', 'Jane Doe', '555-111-2222 | jane@example.com', 'Instagram', '2025-08-10', '2025-08-11', 'Answered', 'Interested in program', '2025-08-15', 'We Called', 'Left detailed VM', '2025-08-20', 'Registered', 'Paid in full'
+                                ];
+                                const csv = [headers.join(','), sample.map(v => '"' + v.replace(/"/g, '""') + '"').join(',')].join('\n');
+                                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url; a.download = 'leads-template.csv'; a.click();
+                                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                            }} className="inline-flex items-center gap-2 px-3 h-10 rounded-xl bg-white/70 hover:bg-white ring-1 ring-white/60 font-semibold">
+                                <Download size={14} /> Template
+                            </button>
+                            <button
+                                type="button"
+                                disabled={forceSyncStatus.running}
+                                onClick={async () => {
+                                    setForceSyncStatus({ running: true, msg: null });
+                                    try {
+                                        const res = await forceSync();
+                                        setForceSyncStatus({ running: false, msg: `Synced ${res.added} new / ${res.skipped} existing` });
+                                        setTimeout(() => setForceSyncStatus(s => s.running ? s : { running: false, msg: null }), 4000);
+                                    } catch (e) {
+                                        console.error(e);
+                                        setForceSyncStatus({ running: false, msg: 'Sync failed (see console)' });
+                                        setTimeout(() => setForceSyncStatus(s => s.running ? s : { running: false, msg: null }), 5000);
+                                    }
+                                }}
+                                className="inline-flex items-center gap-2 px-3 h-10 rounded-xl bg-white/70 hover:bg-white ring-1 ring-white/60 font-semibold disabled:opacity-50"
+                            >
+                                {forceSyncStatus.running ? 'Syncing…' : 'Force Sync to Cloud'}
+                            </button>
+                            {forceSyncStatus.msg && (
+                                <span className="text-[10px] font-semibold opacity-80">{forceSyncStatus.msg}</span>
+                            )}
+                        </div>
+                        <label className={`relative flex flex-col items-center justify-center gap-3 h-52 border-2 border-dashed rounded-2xl cursor-pointer transition ${importing ? 'opacity-60 pointer-events-none' : 'hover:bg-white'} bg-white/60 ring-1 ring-white/60`}>
                             <input type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => {
-                                const file = e.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { try { const text = reader.result as string; const lines = text.split(/\r?\n/).filter(l => l.trim()); alert(`Imported ${lines.length - 1} rows (header assumed).`); } catch { } }; reader.readAsText(file);
+                                const file = e.target.files?.[0]; if (!file) return; setImportResult(null); setImporting(true);
+                                Papa.parse(file, {
+                                    header: true, skipEmptyLines: true, complete: async (results) => {
+                                        try {
+                                            const rows = results.data as Record<string, unknown>[];
+                                            if (!rows.length) { setImporting(false); return; }
+                                            const existingIds = new Set<string>(customersForExport.map(c => c.id));
+                                            let created = 0; let updated = 0;
+                                            const toCustomers = rows.map((row, idx) => {
+                                                const asStr = (v: unknown) => (v ?? '').toString();
+                                                const contactRaw = asStr(row['Contact Info']);
+                                                let phone = contactRaw; let email: string | undefined;
+                                                if (contactRaw.includes('|')) {
+                                                    const parts = contactRaw.split('|').map((p: string) => p.trim());
+                                                    parts.forEach((p: string) => { if (!email && /@/.test(p)) email = p; });
+                                                    const phoneCandidate = parts.find((p: string) => /\d/.test(p) && !/@/.test(p));
+                                                    phone = phoneCandidate ? phoneCandidate.replace(/\s+/g, ' ') : '';
+                                                } else if (/@/.test(contactRaw)) { email = contactRaw.trim(); phone = ''; }
+                                                const sourceFile = asStr(row['Source (Facebook/Instagram/WhatsApp/TikTok)']);
+                                                const sourceFinal = (importSource || sourceFile) as string;
+                                                let rawLeadId = asStr(row['Lead ID']);
+                                                if (!rawLeadId) rawLeadId = `imp_${Date.now()}_${idx}`;
+                                                let leadId = rawLeadId.trim();
+                                                let duplicate = existingIds.has(leadId);
+                                                if (duplicate) {
+                                                    if (treatDuplicateLeadIdsAsUpdates) {
+                                                        updated++;
+                                                    } else {
+                                                        // generate new unique id
+                                                        leadId = `imp_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 7)}`;
+                                                        duplicate = false;
+                                                        created++;
+                                                    }
+                                                } else {
+                                                    created++;
+                                                }
+                                                existingIds.add(leadId);
+                                                return {
+                                                    leadId,
+                                                    name: asStr(row['Customer Name']),
+                                                    phone,
+                                                    email,
+                                                    country: undefined,
+                                                    source: sourceFinal,
+                                                    dateAdded: asStr(row['Date Entered']),
+                                                    firstCallDate: asStr(row['Date First Called']),
+                                                    firstCallStatus: asStr(row['First Call Status (Voicemail/Answered/Interested/Not Interested)']),
+                                                    notes: asStr(row['Notes from First Call']),
+                                                    secondCallDate: asStr(row['Date Second Call']),
+                                                    secondCallStatus: asStr(row['Second Call Status (They Called/We Called/Voicemail/Answered)']),
+                                                    secondCallNotes: asStr(row['Second Call Notes']),
+                                                    finalCallDate: asStr(row['Date Registered']),
+                                                    finalStatus: asStr(row['Final Status (Registered/Not Registered/Follow-up Needed)']),
+                                                    finalNotes: asStr(row['Final Notes']),
+                                                    pronouns: undefined, device: undefined, leadScore: undefined, lastUpdated: new Date().toISOString(), lastMessageSnippet: undefined, messageCount: undefined,
+                                                };
+                                            });
+                                            await bulkUpsert({ customers: toCustomers });
+                                            const dedupeResult = await dedupePhonesMutation({});
+                                            setImportResult({ rows: toCustomers.length, merged: dedupeResult.merged || 0, removed: dedupeResult.removed || 0, created, updated });
+                                            // Helpful console diagnostics (development only)
+                                            if (process.env.NODE_ENV !== 'production') {
+                                                console.groupCollapsed('[Import Diagnostics]');
+                                                console.log('Rows parsed', rows.length);
+                                                console.log('Created (new IDs)', created, 'Updated (existing IDs)', updated);
+                                                console.log('Deduper merged', dedupeResult.merged, 'removed', dedupeResult.removed);
+                                                console.log('Treat duplicates as updates?', treatDuplicateLeadIdsAsUpdates);
+                                                console.groupEnd();
+                                            }
+                                        } catch (err) {
+                                            console.error(err);
+                                        } finally {
+                                            setImporting(false);
+                                        }
+                                    }
+                                });
                             }} />
-                            <span className="text-[12px] font-semibold">Click or Drop CSV</span>
+                            <span className="text-[12px] font-semibold">{importing ? 'Importing…' : 'Click or Drop CSV'}</span>
                             <span className="text-[10px] font-medium opacity-60">Max ~5MB • UTF‑8</span>
+                            {importResult && (
+                                <div className="absolute bottom-3 left-3 right-3 text-[10px] font-semibold bg-white/80 rounded-lg px-2 py-1 text-gray-700 space-y-0.5">
+                                    <div>Imported {importResult.rows} rows • New {importResult.created} • Updated {importResult.updated}</div>
+                                    {(importResult.merged > 0 || importResult.removed > 0) && <div className="text-[9px] font-medium opacity-70">Post-import merge: {importResult.merged} merged • {importResult.removed} removed</div>}
+                                </div>
+                            )}
                         </label>
+                        <div className="text-[10px] font-medium opacity-70 leading-relaxed" style={{ color: accentColor }}>
+                            Required headers: Lead ID, Customer Name, Contact Info, Source (Facebook/Instagram/WhatsApp/TikTok), Date Entered, Date First Called, First Call Status (Voicemail/Answered/Interested/Not Interested), Notes from First Call, Date Second Call, Second Call Status (They Called/We Called/Voicemail/Answered), Second Call Notes, Date Registered, Final Status (Registered/Not Registered/Follow-up Needed), Final Notes.
+                            Contact Info supports &quot;phone | email&quot; combined or just phone or email.
+                        </div>
                     </div>
                 )}
                 {active === 'export' && (
                     <div className="space-y-4">
                         <h2 className="text-sm font-extrabold uppercase tracking-[0.18em]" style={{ color: accentColor }}>Export & Backup</h2>
-                        <p className="text-[11px] font-medium" style={{ color: accentColor, opacity: .85 }}>Theme export available now. Data export (CSV / JSON) coming soon.</p>
-                        <button onClick={exportTheme} className="px-4 h-11 rounded-xl text-[12px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Download Theme JSON</button>
+                        <p className="text-[11px] font-medium" style={{ color: accentColor, opacity: .85 }}>Download a full CSV snapshot of all customers plus theme JSON backup.</p>
+                        <div className="flex flex-wrap gap-3">
+                            <button onClick={exportTheme} className="px-4 h-11 rounded-xl text-[12px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Download Theme JSON</button>
+                            <button onClick={() => {
+                                try {
+                                    const rows = customersForExport || [];
+                                    if (!rows.length) { alert('No customers to export'); return; }
+                                    const headers = [
+                                        'Lead ID', 'Customer Name', 'Phone', 'Email', 'Source', 'Date Entered', 'Date First Called', 'First Call Status', 'Notes from First Call', 'Date Second Call', 'Second Call Status', 'Second Call Notes', 'Date Registered', 'Final Status', 'Final Notes', 'Duplicate Lead IDs', 'Duplicate Dates'
+                                    ];
+                                    const esc = (v: unknown) => '"' + (v == null ? '' : String(v).replace(/"/g, '""')) + '"';
+                                    const csvLines = [headers.join(',')];
+                                    for (const c of rows) {
+                                        csvLines.push([
+                                            esc(c.id), esc(c.name), esc(c.phone), esc(c.email || ''), esc(c.source), esc(c.dateAdded), esc(c.firstCallDate), esc(c.firstCallStatus), esc(c.notes), esc(c.secondCallDate), esc(c.secondCallStatus), esc(c.secondCallNotes), esc(c.finalCallDate), esc(c.finalStatus), esc(c.finalNotes), esc((c.duplicateLeadIds || []).join('|')), esc((c.duplicateDateAdds || []).join('|'))
+                                        ].join(','));
+                                    }
+                                    const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = url; a.download = 'customers-export.csv'; a.click();
+                                    setTimeout(() => URL.revokeObjectURL(url), 1200);
+                                } catch (e) { console.error(e); }
+                            }} className="px-4 h-11 rounded-xl text-[12px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Download Customers CSV</button>
+                        </div>
                     </div>
                 )}
                 {active === 'appearance' && (
@@ -1323,6 +1817,7 @@ function LogoUploader({ label, value, onChange, clearLabel, accentColor, aspectH
                     minHeight: '110px'
                 }}
             >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
                 {value ? <img src={value} alt={label} className="object-contain max-w-full max-h-full" /> : <span className="text-[10px] font-medium opacity-60">None</span>}
             </div>
             {aspectHint && <div className="text-[9px] font-medium opacity-60" style={{ color: accentColor }}>{aspectHint}</div>}
@@ -1336,114 +1831,4 @@ function LogoUploader({ label, value, onChange, clearLabel, accentColor, aspectH
     );
 }
 
-function ColorSuggestions({ base, onPick }: { base: string; onPick: (role: string, color: string) => void }) {
-    // Simple HSL derive
-    const toHSL = (hex: string) => {
-        const m = hex.replace('#', '');
-        if (m.length !== 6) return { h: 0, s: 0, l: 0 };
-        const r = parseInt(m.slice(0, 2), 16) / 255;
-        const g = parseInt(m.slice(2, 4), 16) / 255;
-        const b = parseInt(m.slice(4, 6), 16) / 255;
-        const max = Math.max(r, g, b), min = Math.min(r, g, b); let h = 0, s = 0; const l = (max + min) / 2; const d = max - min;
-        if (d) { s = l > 0.5 ? d / (2 - max - min) : d / (max + min); switch (max) { case r: h = (g - b) / d + (g < b ? 6 : 0); break; case g: h = (b - r) / d + 2; break; case b: h = (r - g) / d + 4; break; } h /= 6; }
-        return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
-    };
-    const fromHSL = (h: number, s: number, l: number) => `hsl(${h} ${s}% ${l}%)`;
-    const hsl = toHSL(base || '#888888');
-    const roles = [
-        { role: 'from', label: 'From' },
-        { role: 'via', label: 'Via' },
-        { role: 'to', label: 'To' },
-        { role: 'background', label: 'Background' },
-        { role: 'border', label: 'Border' },
-        { role: 'card', label: 'Card' },
-        { role: 'muted', label: 'Muted' },
-        { role: 'primaryText', label: 'Primary Text' },
-        { role: 'secondaryText', label: 'Secondary Text' },
-    ];
-    const palette = [
-        fromHSL(hsl.h, hsl.s, Math.min(95, hsl.l + 40)),
-        fromHSL(hsl.h, hsl.s, Math.min(90, hsl.l + 30)),
-        fromHSL(hsl.h, hsl.s, Math.min(80, hsl.l + 20)),
-        fromHSL(hsl.h, hsl.s, Math.max(60, hsl.l)),
-        fromHSL(hsl.h, Math.min(100, hsl.s + 10), Math.max(45, hsl.l - 10)),
-        fromHSL((hsl.h + 30) % 360, hsl.s, hsl.l),
-        fromHSL((hsl.h + 180) % 360, hsl.s, hsl.l),
-        fromHSL((hsl.h + 210) % 360, hsl.s, hsl.l),
-    ];
-    return (
-        <div className="mt-10 space-y-4">
-            <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: '#1a1026' }}>Suggestions</div>
-            <div className="grid md:grid-cols-2 gap-6">
-                {roles.map(r => (
-                    <div key={r.role} className="space-y-2">
-                        <div className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#2e1b40' }}>{r.label}</div>
-                        <div className="flex flex-wrap gap-2">
-                            {palette.map(p => (
-                                <button key={r.role + p} onClick={() => onPick(r.role, p)} className="w-8 h-8 rounded-xl ring-1 ring-white/60 shadow" style={{ background: p }} />
-                            ))}
-                        </div>
-                    </div>
-                ))}
-            </div>
-        </div>
-    );
-}
-
-function StatusColorEditors({ customStatusColors, updateStatusColor }: any) {
-    const statuses = ['Interested', 'Answered', 'Voicemail', 'They Called', 'We Called', 'Registered', 'Follow-up Needed', 'Not Registered'];
-    return (
-        <div className="mt-10 space-y-4">
-            <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: '#1a1026' }}>Status Badge Colors</div>
-            <div className="grid md:grid-cols-2 gap-4">
-                {statuses.map(s => {
-                    const val = customStatusColors[s] || '';
-                    return (
-                        <label key={s} className="flex items-center gap-3 text-[11px] font-semibold uppercase tracking-wide bg-white/60 rounded-xl px-3 py-2 ring-1 ring-white/60" style={{ color: '#1a1026' }}>
-                            <span className="flex-1">{s}</span>
-                            <input type="color" value={val || '#ffffff'} onChange={e => updateStatusColor(s, e.target.value)} className="h-9 w-12 p-1 rounded-lg bg-white/70 ring-1 ring-white/60" />
-                            <input value={val} onChange={e => updateStatusColor(s, e.target.value)} placeholder="#hex" className="h-9 w-32 px-2 rounded-lg border bg-white/80 text-[11px] font-medium" style={{ borderColor: '#2e1b40' }} />
-                            <button type="button" onClick={() => updateStatusColor(s, '')} className="px-2 h-9 rounded-lg text-[10px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Reset</button>
-                        </label>
-                    );
-                })}
-            </div>
-        </div>
-    );
-}
-
-function ThemeIO({ exportTheme, importTheme }: { exportTheme: () => void; importTheme: (f: File) => void }) {
-    const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) importTheme(file); };
-    return (
-        <div className="mt-10 flex flex-wrap gap-4 items-center">
-            <button type="button" onClick={exportTheme} className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Export Theme</button>
-            <label className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60 flex items-center gap-2 cursor-pointer">Import Theme
-                <input type="file" accept="application/json" className="hidden" onChange={handleImport} />
-            </label>
-        </div>
-    );
-}
-
-function ColorInput({ label, value, onChange, accentColor }: { label: string; value: string; onChange: (v: string) => void; accentColor?: string }) {
-    const accent = accentColor || '#5b21b6';
-    return (
-        <label className="flex flex-col gap-2 text-[11px] font-semibold uppercase tracking-wide" style={{ color: accent }}>
-            {label}
-            <div className="flex items-center gap-3">
-                <input
-                    type="color"
-                    value={value}
-                    onChange={e => onChange(e.target.value)}
-                    className="h-10 w-14 p-1 rounded-xl bg-white/70 ring-1"
-                    style={{ boxShadow: `0 0 0 1px ${accent}` }}
-                />
-                <input
-                    value={value}
-                    onChange={e => onChange(e.target.value)}
-                    className="flex-1 h-10 px-3 rounded-xl border bg-white/80 text-[12px] font-medium"
-                    style={{ borderColor: accent + '40' }}
-                />
-            </div>
-        </label>
-    );
-}
+// Removed unused helper components (ColorSuggestions, StatusColorEditors, ThemeIO, ColorInput) to satisfy lint no-unused-vars warnings.

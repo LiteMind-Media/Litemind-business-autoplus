@@ -158,7 +158,21 @@ function CustomerCard({ customer: c, /* leadNumber */ customStatusColors, onUpda
                     <Input type="date" value={c.firstCallDate || ""} onChange={(e) => onUpdateCustomer(c.id, { firstCallDate: e.target.value })} />
                 </Field>
                 <Field label="First Call Status" icon={<CheckCircle2 size={14} className="text-gray-400" />}>
-                    <Select value={c.firstCallStatus || ""} onChange={(e) => onUpdateCustomer(c.id, { firstCallStatus: e.target.value as Customer["firstCallStatus"] })}>
+                    <Select value={c.firstCallStatus || ""} onChange={(e) => {
+                        const val = e.target.value as Customer['firstCallStatus'];
+                        if (!val) {
+                            onUpdateCustomer(c.id, {
+                                firstCallStatus: '' as Customer['firstCallStatus'],
+                                firstCallDate: '',
+                                secondCallStatus: '' as Customer['secondCallStatus'],
+                                secondCallDate: '',
+                                finalStatus: '' as Customer['finalStatus'],
+                                finalCallDate: ''
+                            });
+                        } else {
+                            onUpdateCustomer(c.id, { firstCallStatus: val });
+                        }
+                    }}>
                         <option value="">Select...</option>
                         {FIRST_CALL_STATUS_OPTIONS.map((opt) => (
                             <option key={opt} value={opt}>{opt}</option>
@@ -170,7 +184,19 @@ function CustomerCard({ customer: c, /* leadNumber */ customStatusColors, onUpda
                     <Input type="date" value={c.secondCallDate || ""} onChange={(e) => onUpdateCustomer(c.id, { secondCallDate: e.target.value })} />
                 </Field>
                 <Field label="Second Call Status" icon={<Clock3 size={14} className="text-gray-400" />}>
-                    <Select value={c.secondCallStatus || ""} onChange={(e) => onUpdateCustomer(c.id, { secondCallStatus: e.target.value as Customer["secondCallStatus"] })}>
+                    <Select value={c.secondCallStatus || ""} onChange={(e) => {
+                        const val = e.target.value as Customer['secondCallStatus'];
+                        if (!val) {
+                            onUpdateCustomer(c.id, {
+                                secondCallStatus: '' as Customer['secondCallStatus'],
+                                secondCallDate: '',
+                                finalStatus: '' as Customer['finalStatus'],
+                                finalCallDate: ''
+                            });
+                        } else {
+                            onUpdateCustomer(c.id, { secondCallStatus: val });
+                        }
+                    }}>
                         <option value="">Select...</option>
                         {SECOND_CALL_STATUS_OPTIONS.map((opt) => (
                             <option key={opt} value={opt}>{opt}</option>

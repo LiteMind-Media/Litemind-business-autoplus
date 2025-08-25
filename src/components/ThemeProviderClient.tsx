@@ -2,7 +2,7 @@
 import React from 'react';
 
 export default function ThemeProviderClient({ children }: { children: React.ReactNode }) {
-    const [theme, setTheme] = React.useState<'light' | 'dark'>(() => {
+    const [theme] = React.useState<'light' | 'dark'>(() => {
         if (typeof window === 'undefined') return 'light';
         const stored = localStorage.getItem('theme');
         if (stored === 'light' || stored === 'dark') return stored;

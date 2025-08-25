@@ -1,5 +1,5 @@
 "use client";
-import { BarChart3, Workflow, Users2, Table, LayoutGrid, CalendarDays, Settings, LayoutDashboard } from 'lucide-react';
+import { BarChart3, Workflow, Users2, Table, CalendarDays, Settings, LayoutDashboard } from 'lucide-react';
 import React from 'react';
 
 interface NavItem { key: string; label: string; icon: React.ReactNode; }

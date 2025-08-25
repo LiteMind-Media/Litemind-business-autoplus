@@ -145,9 +145,6 @@ export const PRESET_THEMES: Record<string, BrandTheme> = {
 const defaultTheme: BrandTheme = PRESET_THEMES.amber;
 
 // Removed pre-hydration synchronous localStorage read to avoid SSR/client mismatch.
-// We'll hydrate theme after mount; overlay in page prevents visible flash.
-const syncInitialTheme: BrandTheme | null = null;
-const syncInitialStatus: Record<string, string> | null = null;
 
 export function useTheme() {
   const [theme, setTheme] = useState<BrandTheme>(defaultTheme);

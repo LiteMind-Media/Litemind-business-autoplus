@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useState } from 'react';
 import { Customer, SOURCE_OPTIONS, FIRST_CALL_STATUS_OPTIONS, SECOND_CALL_STATUS_OPTIONS, FINAL_STATUS_OPTIONS } from '@/types/customer';
-import { X, User2, Phone, Mail, Layers, BadgeCheck, CalendarDays } from 'lucide-react';
+import { X, User2, Phone, Mail, Layers, CalendarDays } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { deriveBadgePalette } from '@/utils/color';
 
@@ -35,7 +35,7 @@ export function CustomerModal({ customer, onClose, onUpdate }: CustomerModalProp
     const [manualOverride, setManualOverride] = useState(false);
     const [dirtyKeys, setDirtyKeys] = useState<Set<keyof Customer>>(new Set());
     const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
-
+    const { customStatusColors } = useTheme();
     useEffect(() => { setForm(customer); setManualOverride(false); setDirtyKeys(new Set()); }, [customer]);
     if (!customer || !form) return null;
 
@@ -53,13 +53,36 @@ export function CustomerModal({ customer, onClose, onUpdate }: CustomerModalProp
     const updateFirstStatus = (status: Customer['firstCallStatus']) => {
         const patch: Partial<Customer> = { firstCallStatus: status };
         setField('firstCallStatus', status);
-        if (status && !form.firstCallDate) { patch.firstCallDate = today; setField('firstCallDate', today); }
+        // If setting a status ensure date; if clearing, cascade clear downstream fields
+        if (status) {
+            if (!form.firstCallDate) { patch.firstCallDate = today; setField('firstCallDate', today); }
+        } else {
+            // Clearing first status resets second + final stages so progress bar regresses
+            patch.firstCallDate = '';
+            patch.secondCallStatus = '' as Customer['secondCallStatus'];
+            patch.secondCallDate = '';
+            patch.finalStatus = '' as Customer['finalStatus'];
+            patch.finalCallDate = '';
+            setField('firstCallDate', '');
+            setField('secondCallStatus', '' as Customer['secondCallStatus']);
+            setField('secondCallDate', '');
+            setField('finalStatus', '' as Customer['finalStatus']);
+            setField('finalCallDate', '');
+        }
         applyPatch(patch);
     };
     const updateSecondStatus = (status: Customer['secondCallStatus']) => {
         const patch: Partial<Customer> = { secondCallStatus: status };
         setField('secondCallStatus', status);
-        if (status && !form.secondCallDate) { patch.secondCallDate = today; setField('secondCallDate', today); }
+        if (status) {
+            if (!form.secondCallDate) { patch.secondCallDate = today; setField('secondCallDate', today); }
+        } else {
+            // Clearing second status should also clear final stage (cannot have final without second contact context)
+            patch.finalStatus = '' as Customer['finalStatus'];
+            patch.finalCallDate = '';
+            setField('finalStatus', '' as Customer['finalStatus']);
+            setField('finalCallDate', '');
+        }
         applyPatch(patch);
     };
     const updateFinalStatus = (status: Customer['finalStatus']) => {
@@ -72,7 +95,11 @@ export function CustomerModal({ customer, onClose, onUpdate }: CustomerModalProp
     const commitAndClose = () => {
         if (!form) return onClose();
         const patch: Partial<Customer> = {};
-        dirtyKeys.forEach(k => { if (form[k] !== customer[k]) (patch as any)[k] = form[k]; });
+        dirtyKeys.forEach(k => {
+            if (form[k] !== customer[k]) {
+                (patch as Record<string, unknown>)[k as string] = form[k];
+            }
+        });
         if (Object.keys(patch).length) applyPatch(patch);
         onClose();
     };
@@ -90,7 +117,7 @@ export function CustomerModal({ customer, onClose, onUpdate }: CustomerModalProp
         applyPatch(updates);
     };
 
-    const { customStatusColors } = useTheme();
+    // moved useTheme above the early return to satisfy rules-of-hooks
 
     const initials = (form.name || 'C').split(/\s+/).slice(0, 2).map(p => p[0]?.toUpperCase()).join('');
     const statusBadges: { label: string; value?: string | null }[] = [
@@ -190,9 +217,9 @@ export function CustomerModal({ customer, onClose, onUpdate }: CustomerModalProp
                                     </div>
                                     <div className="space-y-4 md:col-span-2">
                                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                            <SelectField label="First Call" value={form.firstCallStatus} options={FIRST_CALL_STATUS_OPTIONS} onChange={v => updateFirstStatus(v as any)} />
-                                            <SelectField label="Second Call" value={form.secondCallStatus} options={SECOND_CALL_STATUS_OPTIONS} onChange={v => updateSecondStatus(v as any)} />
-                                            <SelectField label="Final Status" value={form.finalStatus} options={FINAL_STATUS_OPTIONS} onChange={v => updateFinalStatus(v as any)} />
+                                            <SelectField label="First Call" value={form.firstCallStatus} options={FIRST_CALL_STATUS_OPTIONS} onChange={v => updateFirstStatus(v as Customer['firstCallStatus'])} />
+                                            <SelectField label="Second Call" value={form.secondCallStatus} options={SECOND_CALL_STATUS_OPTIONS} onChange={v => updateSecondStatus(v as Customer['secondCallStatus'])} />
+                                            <SelectField label="Final Status" value={form.finalStatus} options={FINAL_STATUS_OPTIONS} onChange={v => updateFinalStatus(v as Customer['finalStatus'])} />
                                         </div>
                                     </div>
                                 </div>
@@ -210,7 +237,7 @@ export function CustomerModal({ customer, onClose, onUpdate }: CustomerModalProp
                             <div className="space-y-6">
                                 <SectionTitle title="Metrics" />
                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
-                                    <NumberField label="Lead Score" value={form.leadScore ?? ''} onChange={v => { setField('leadScore', v as any); applyPatch({ leadScore: v === '' ? undefined : v as number }); }} placeholder="0-100" />
+                                    <NumberField label="Lead Score" value={form.leadScore ?? ''} onChange={v => { if (v === '') { setField('leadScore', undefined as unknown as number); applyPatch({ leadScore: undefined }); } else { setField('leadScore', v); applyPatch({ leadScore: v }); } }} placeholder="0-100" />
                                     <ReadOnlyMetric label="Last Updated" value={form.lastUpdated ? pretty(form.lastUpdated) : '—'} />
                                 </div>
                             </div>
@@ -226,14 +253,6 @@ function FieldLabel({ icon, label }: { icon?: React.ReactNode; label: string }) 
     return <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--brand-text-secondary)' }}>{icon}{label}</div>;
 }
 
-function FieldGroup({ icon, title, children }: { icon?: React.ReactNode; title: string; children: React.ReactNode }) {
-    return (
-        <div className="space-y-3">
-            <FieldLabel icon={icon} label={title} />
-            {children}
-        </div>
-    );
-}
 
 function DateInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
     return (
@@ -276,14 +295,6 @@ function NumberField({ label, value, onChange, placeholder }: { label: string; v
     );
 }
 
-function TextField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-    return (
-        <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: 'var(--brand-text-primary)' }}>
-            <span className="font-semibold uppercase tracking-wide" style={{ color: 'var(--brand-text-secondary)' }}>{label}</span>
-            <input value={value} onChange={e => onChange(e.target.value)} className="h-10 rounded-xl px-3 text-sm font-semibold" style={{ background: 'var(--brand-card-bg)', border: '1px solid var(--brand-border)', color: 'var(--brand-text-primary)' }} />
-        </label>
-    );
-}
 
 // New premium layout building blocks
 function SectionTitle({ title, subtle }: { title: string; subtle?: boolean }) {

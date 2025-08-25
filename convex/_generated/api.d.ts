@@ -14,6 +14,7 @@ import type {
   FunctionReference,
 } from "convex/server";
 import type * as brand from "../brand.js";
+import type * as customers from "../customers.js";
 import type * as goals from "../goals.js";
 import type * as statusColors from "../statusColors.js";
 import type * as theme from "../theme.js";
@@ -28,6 +29,7 @@ import type * as theme from "../theme.js";
  */
 declare const fullApi: ApiFromModules<{
   brand: typeof brand;
+  customers: typeof customers;
   goals: typeof goals;
   statusColors: typeof statusColors;
   theme: typeof theme;
