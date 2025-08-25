@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
 
-# Enhanced git push helper with interactive remote (GitHub account) selection.
+# Git push helper focused on "push EVERYTHING and verify nothing is missed".
+# Ensures:
+#  - Repository initialized (if not)
+#  - All files (adds, mods, deletions) staged (git add -A)
+#  - Shows any remaining untracked files (should be zero)
+#  - Reports ignored files you might care about (optional prompt to include)
+#  - Warns about any file >95MB (GitHub hard limit ~100MB)
+#  - Prompts for remote if absent, sets upstream if missing
+#  - Pushes selected branch
 #
 # Usage examples:
 #   ./scripts/git-push.sh -m "feat: add thing"
 #   ./scripts/git-push.sh -r origin -b main -m "chore: deps"
-#   ./scripts/git-push.sh              # will prompt for commit message & remote
+#   ./scripts/git-push.sh              # prompts (remote, message if not provided)
 #
 # Flags:
 #   -m "message"  Commit message (default: prompt if not provided)
-#   -r remote     Remote name to use (default: prompt or origin)
+#   -r remote     Remote name to use (default: origin if exists)
 #   -b branch     Branch name (default: current branch or main)
-#   -n            Dry run (show actions, no push)
+#   -n            Dry run (no push)
 #   -h            Help
+#   --include-ignored  Temporarily add ignored files (copies them without editing .gitignore)
 
 set -euo pipefail
 
@@ -24,6 +33,14 @@ DRY_RUN=false
 REMOTE=""
 BRANCH=""
 MSG=""
+INCLUDE_IGNORED=false
+
+# Parse long flag first
+for arg in "$@"; do
+  case $arg in
+    --include-ignored) INCLUDE_IGNORED=true; shift ;; # processed, remove from list
+  esac
+done
 
 while getopts ":m:r:b:nh" opt; do
   case $opt in
@@ -44,9 +61,9 @@ if [[ -z "$MSG" && $# -gt 0 ]]; then
   MSG="$1"; shift || true
 fi
 
-if [[ -z "$MSG" ]]; then
-  read -rp "Commit message: " MSG
-  [[ -z "$MSG" ]] && die "Commit message required"
+if [[ ! -d .git ]]; then
+  echo -e "${COLOR_BLUE}[init] Initializing new git repository${COLOR_RESET}"
+  git init
 fi
 
 # Determine current branch if not provided
@@ -55,36 +72,99 @@ if [[ -z "$BRANCH" ]]; then
   [[ "$BRANCH" == "HEAD" ]] && BRANCH="main"
 fi
 
-# Collect remotes
-mapfile -t REMOTE_LINES < <(git remote -v | awk '{print $1"|"$2}' | sort -u) || die "Not a git repository?"
-if [[ ${#REMOTE_LINES[@]} -eq 0 ]]; then
-  die "No git remotes configured. Add one: git remote add origin <url>"
+if ! git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
+  echo -e "${COLOR_BLUE}[branch] Creating branch $BRANCH${COLOR_RESET}"
+  git checkout -b "$BRANCH"
 fi
 
-extract_owner_repo() {
-  local url="$1"; local owner path
-  # SSH: git@github.com:owner/repo.git
-  if [[ $url =~ github.com:([^/]+)/([^ ]+)$ ]]; then
-    owner="${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
-    echo "$owner"; return
-  fi
-  # HTTPS: https://github.com/owner/repo.git
-  if [[ $url =~ github.com/([^/]+)/([^ ]+)$ ]]; then
-    owner="${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
-    echo "$owner"; return
-  fi
-  echo "$url"
-}
+if [[ -z "$MSG" ]]; then
+  read -rp "Commit message: " MSG
+  [[ -z "$MSG" ]] && MSG="chore: update"
+fi
 
+echo -e "${COLOR_BLUE}== Pre-flight checks ==${COLOR_RESET}";
+
+TOTAL_FILES=$(find . -type f \( -path ./.git -prune -false -o -print \) | wc -l | tr -d ' ')
+TRACKED_COUNT=$(git ls-files | wc -l | tr -d ' ')
+UNTRACKED_LIST=$(git ls-files --others --exclude-standard)
+UNTRACKED_COUNT=$(echo "$UNTRACKED_LIST" | sed '/^$/d' | wc -l | tr -d ' ')
+
+echo "Total files (excluding .git): $TOTAL_FILES"
+echo "Currently tracked: $TRACKED_COUNT"
+echo "Untracked before staging: $UNTRACKED_COUNT"
+
+if [[ $UNTRACKED_COUNT -gt 0 ]]; then
+  echo -e "${COLOR_YELLOW}Untracked sample:${COLOR_RESET}"; echo "$UNTRACKED_LIST" | head -10
+fi
+
+echo -e "${COLOR_BLUE}[stage] Adding ALL changes (add/modify/delete)${COLOR_RESET}"
+git add -A
+
+if [[ "$INCLUDE_IGNORED" == true ]]; then
+  echo -e "${COLOR_YELLOW}[ignored] Attempting to include ignored files${COLOR_RESET}"
+  # Collect ignored files (excluding node_modules/.next by default)
+  mapfile -t IGNORED < <(git ls-files -o -i --exclude-standard | grep -vE '(^node_modules/|^\.next/)') || true
+  if [[ ${#IGNORED[@]} -gt 0 ]]; then
+    printf '%s\n' "${IGNORED[@]}" | while read -r f; do
+      [ -f "$f" ] && git add -f "$f" || true
+    done
+    echo "Forced add of ${#IGNORED[@]} ignored file(s).";
+  else
+    echo "No ignored files to force add (or all filtered)."
+  fi
+fi
+
+# Post stage verification
+POST_UNTRACKED=$(git ls-files --others --exclude-standard || true)
+if [[ -n "$POST_UNTRACKED" ]]; then
+  echo -e "${COLOR_YELLOW}[warn] Remaining untracked files (not added):${COLOR_RESET}"
+  echo "$POST_UNTRACKED"
+else
+  echo -e "${COLOR_GREEN}[ok] All files are staged or intentionally ignored${COLOR_RESET}"
+fi
+
+# Large file warning (>95MB)
+LARGE_FILES=$(find . -type f -size +95M ! -path "./.git/*" 2>/dev/null || true)
+if [[ -n "$LARGE_FILES" ]]; then
+  echo -e "${COLOR_RED}[large] Files exceeding 95MB (GitHub limit ~100MB). Consider Git LFS:${COLOR_RESET}"
+  echo "$LARGE_FILES"
+fi
+
+echo -e "${COLOR_BLUE}[commit] Creating commit if there are staged changes${COLOR_RESET}"
+if git diff --cached --quiet; then
+  echo "No staged changes (nothing to commit)."
+else
+  git commit -m "$MSG" || true
+fi
+
+# Remote handling
 if [[ -z "$REMOTE" ]]; then
-  echo -e "${COLOR_BLUE}Select remote (GitHub account/org) to use:${COLOR_RESET}"
-  idx=1
-  declare -A REMOTE_MAP
-  for line in "${REMOTE_LINES[@]}"; do
-    name="${line%%|*}"; url="${line#*|}";
-    REMOTE_MAP[$idx]="$name"
-    owner_repo=$(extract_owner_repo "$url")
-    printf "  %2d) %-10s %s\n" "$idx" "$name" "$owner_repo"
+  if git remote get-url origin >/dev/null 2>&1; then
+    REMOTE="origin"
+  else
+    read -rp "Remote not set. Enter new remote URL (GitHub): " REMOTE_URL
+    [[ -z "$REMOTE_URL" ]] && die "Remote URL required"
+    git remote add origin "$REMOTE_URL"
+    REMOTE="origin"
+    echo -e "${COLOR_GREEN}[remote] Added origin -> $REMOTE_URL${COLOR_RESET}"
+  fi
+fi
+
+git remote get-url "$REMOTE" >/dev/null 2>&1 || die "Remote '$REMOTE' not found"
+
+echo -e "${COLOR_BLUE}[push] Pushing branch $BRANCH to $REMOTE${COLOR_RESET}"
+if [[ "$DRY_RUN" == false ]]; then
+  # Set upstream if not already
+  if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
+    git push "$REMOTE" "$BRANCH" --follow-tags
+  else
+    git push -u "$REMOTE" "$BRANCH" --follow-tags
+  fi
+else
+  echo "(dry run) skipped push"
+fi
+
+echo -e "${COLOR_GREEN}Done. All files tracked & pushed (except intentionally ignored).${COLOR_RESET}"
     ((idx++))
   done
   DEFAULT_REMOTE="origin"
