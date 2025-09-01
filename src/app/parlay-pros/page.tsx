@@ -146,7 +146,7 @@ export default function ParlayProzInstance() {
             // On success, clear dirty flag & remember hash
             localBrandDirtyRef.current = false;
             try { lastSentBrandHashRef.current = JSON.stringify(payload); } catch { }
-    } catch (_ignore) {
+        } catch (_ignore) {
             // Leave dirty flag set so remote won't overwrite during user edits
         }
     }, [saveRemoteBrandBase]);

@@ -123,7 +123,7 @@ export default function AnalyticsOverview({ data, remoteCount, localCount, uniqu
                     <p className="opacity-80">Below are up to first 10 duplicate groups (normalized phone) collapsed in analytics. Higher-scoring record retained; others ignored for metrics.</p>
                     <ul className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
                         {Object.entries(duplicatesByPhone).slice(0, 10).map(([k, arr]) => (
-                            <li key={k} className="p-2 rounded-lg bg-white/70 border border-amber-200/60">{k.replace(/^p:/,'')} <span className="ml-1 px-1.5 rounded bg-amber-100 font-semibold">{arr.length}</span></li>
+                            <li key={k} className="p-2 rounded-lg bg-white/70 border border-amber-200/60">{k.replace(/^p:/, '')} <span className="ml-1 px-1.5 rounded bg-amber-100 font-semibold">{arr.length}</span></li>
                         ))}
                     </ul>
                     {Object.keys(duplicatesByPhone).length > 10 && <div className="opacity-60">{Object.keys(duplicatesByPhone).length - 10} more not shown…</div>}

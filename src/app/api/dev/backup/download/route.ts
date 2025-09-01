@@ -20,8 +20,8 @@ export async function GET(req: Request) {
     const stat = await fs.lstat(filePath).catch(() => null);
     if (!stat || !stat.isFile())
       return NextResponse.json({ error: "Not found" }, { status: 404 });
-  const stream = createReadStream(filePath);
-  return new Response(stream as unknown as ReadableStream, {
+    const stream = createReadStream(filePath);
+    return new Response(stream as unknown as ReadableStream, {
       headers: {
         "Content-Type": "application/gzip",
         "Content-Disposition": `attachment; filename="${name}"`,

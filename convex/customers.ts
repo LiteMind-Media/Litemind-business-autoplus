@@ -56,18 +56,25 @@ export const bulkUpsert = mutation({
       if (instanceId) {
         existingDocs = await ctx.db
           .query("customers")
-          .withIndex("by_instance_leadId", (q) => q.eq("instanceId", instanceId))
+          .withIndex("by_instance_leadId", (q) =>
+            q.eq("instanceId", instanceId)
+          )
           .collect();
       } else {
         existingDocs = await ctx.db.query("customers").collect();
       }
     } catch (e) {
       console.error("bulkUpsert prefetch failed", e);
-      throw new Error("bulkUpsert prefetch failed: " + (e instanceof Error ? e.message : String(e)));
+      throw new Error(
+        "bulkUpsert prefetch failed: " +
+          (e instanceof Error ? e.message : String(e))
+      );
     }
     // If very large batch, suggest chunking (defensive explicit error) - client will chunk after this change but keep guard.
     if (customers.length > 1500) {
-      console.warn("bulkUpsert received very large batch", { size: customers.length });
+      console.warn("bulkUpsert received very large batch", {
+        size: customers.length,
+      });
     }
     // Collapse duplicates in existing set first.
     const byLead: Record<string, any[]> = {};
@@ -93,7 +100,11 @@ export const bulkUpsert = mutation({
       try {
         const normName = (c.name || "").trim().toLowerCase();
         const digits = (c.phone || "").replace(/\D+/g, "");
-        const hasName = !!(normName && normName !== "unknown" && normName !== "unnamed");
+        const hasName = !!(
+          normName &&
+          normName !== "unknown" &&
+          normName !== "unnamed"
+        );
         const hasPhone = digits.length >= 5;
         const hasEmail = !!(c.email && c.email.trim().length > 0);
         if (!hasName && !hasPhone && !hasEmail) {
@@ -103,9 +114,15 @@ export const bulkUpsert = mutation({
         const existing = existingMap[c.leadId];
         if (existing) {
           // Patch existing (avoid patch storm by only updating changed fields could be future optimization)
-            await ctx.db.patch(existing._id, { ...c, instanceId: instanceId || existing.instanceId });
+          await ctx.db.patch(existing._id, {
+            ...c,
+            instanceId: instanceId || existing.instanceId,
+          });
         } else {
-          const insertedId = await ctx.db.insert("customers", { ...c, instanceId });
+          const insertedId = await ctx.db.insert("customers", {
+            ...c,
+            instanceId,
+          });
           // Register in map to prevent duplicate inserts within same batch
           existingMap[c.leadId] = { _id: insertedId, ...c, instanceId } as any;
         }
