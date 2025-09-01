@@ -24,12 +24,18 @@ export function useCustomers({
   const [customers, setCustomers] = useState<Customer[]>([]);
   // Convex remote data & mutations
   // Using string paths because generated api types not yet updated to include customers module
-  const remoteCustomers = useQuery(api.customers.list);
+  const remoteCustomers = useQuery(api.customers.list, {
+    instanceId: instance,
+  }); // args object passed as second param
   const bulkUpsertMutation = useMutation(api.customers.bulkUpsert);
   const removeMutation = useMutation(api.customers.remove);
   const dedupePhonesMutation = useMutation(
     api.customers.dedupePhones as unknown as typeof api.customers.dedupePhones
   );
+  const purgeUnknownMutation = useMutation(
+    api.customers.purgeUnknown as unknown as typeof api.customers.purgeUnknown
+  );
+  const purgedUnknownRef = useRef(false);
   const autoDedupedRef = useRef(false);
   const seededRef = useRef(false);
   const [loaded, setLoaded] = useState(false);
@@ -151,10 +157,16 @@ export function useCustomers({
     void _next;
   }, []); // placeholder persistence (Convex primary source)
 
-  // Convex-first load & seed from CSV + WhatsApp if remote empty
+  // Convex-first load.
+  // Behavior change: ONLY seed from CSV assets when remote (Convex) is empty.
+  // No repeated CSV fetch on subsequent renders once remote has data.
+  // Auto phone dedupe is performed only at:
+  //   1) Initial seed (remote empty)
+  //   2) Explicit add/import operations (handled where mutations occur)
+  // Removed previous unconditional dedupe on every remote adoption.
   useEffect(() => {
     if (remoteCustomers === undefined) return; // still loading
-    // If remote has data adopt it
+    // If remote has data adopt it (no seeding, no auto-dedupe here)
     if (remoteCustomers.length > 0) {
       type RemoteCustomer = { [K in keyof Customer]?: unknown } & {
         leadId: string;
@@ -202,10 +214,12 @@ export function useCustomers({
       const { data: migrated } = migrateDates(cleaned);
       setCustomers(migrated);
       setLoaded(true);
-      if (!autoDedupedRef.current) {
-        autoDedupedRef.current = true;
-        dedupePhonesMutation({}).catch(() => {});
+      // One-time purge of unknown leads (no name/phone/email) – runs in background
+      if (!purgedUnknownRef.current) {
+        purgedUnknownRef.current = true;
+        purgeUnknownMutation({ instanceId: instance }).catch(() => {});
       }
+      // Do not auto-dedupe here; remote is assumed authoritative already.
       return;
     }
     // Seed once if remote empty
@@ -428,6 +442,7 @@ export function useCustomers({
                 });
                 setCustomers(ensured);
                 bulkUpsertMutation({
+                  instanceId: instance,
                   customers: ensured.map((d) => ({
                     leadId: d.id,
                     name: d.name,
@@ -454,9 +469,12 @@ export function useCustomers({
                   })),
                 }).catch(() => {});
                 setLoaded(true);
+                // One-time dedupe after initial seed
                 if (!autoDedupedRef.current) {
                   autoDedupedRef.current = true;
-                  dedupePhonesMutation({}).catch(() => {});
+                  dedupePhonesMutation({ instanceId: instance }).catch(
+                    () => {}
+                  );
                 }
               })
               .catch(() => {
@@ -477,6 +495,7 @@ export function useCustomers({
                 });
                 setCustomers(ensured);
                 bulkUpsertMutation({
+                  instanceId: instance,
                   customers: ensured.map((d) => ({
                     leadId: d.id,
                     name: d.name,
@@ -505,7 +524,9 @@ export function useCustomers({
                 setLoaded(true);
                 if (!autoDedupedRef.current) {
                   autoDedupedRef.current = true;
-                  dedupePhonesMutation({}).catch(() => {});
+                  dedupePhonesMutation({ instanceId: instance }).catch(
+                    () => {}
+                  );
                 }
               });
           },
@@ -522,6 +543,8 @@ export function useCustomers({
     normalizeSource,
     bulkUpsertMutation,
     dedupePhonesMutation,
+    purgeUnknownMutation,
+    instance,
   ]);
 
   const updateCustomer = useCallback(
@@ -540,6 +563,7 @@ export function useCustomers({
           const target = next.find((c) => c.id === id);
           if (target) {
             bulkUpsertMutation({
+              instanceId: instance,
               customers: [
                 {
                   leadId: target.id,
@@ -572,7 +596,7 @@ export function useCustomers({
         return next;
       });
     },
-    [persist, pushHistory, bulkUpsertMutation]
+    [persist, pushHistory, bulkUpsertMutation, instance]
   );
 
   const bulkUpdate = useCallback(
@@ -608,6 +632,7 @@ export function useCustomers({
           const created = next.find((c) => c.id === id);
           if (created) {
             bulkUpsertMutation({
+              instanceId: instance,
               customers: [
                 {
                   leadId: created.id,
@@ -651,7 +676,7 @@ export function useCustomers({
         pushHistory(before);
         persist(next);
         try {
-          removeMutation({ leadId: id }).catch(() => {});
+          removeMutation({ leadId: id, instanceId: instance }).catch(() => {});
         } catch {}
         return next;
       });
@@ -734,6 +759,7 @@ export function useCustomers({
         for (let i = 0; i < missing.length; i += CHUNK) {
           const slice = missing.slice(i, i + CHUNK);
           await bulkUpsertMutation({
+            instanceId: instance,
             customers: slice.map((d) => ({
               leadId: d.id,
               name: d.name,
@@ -765,7 +791,7 @@ export function useCustomers({
         }
         // Trigger dedupe after sync if remote had fewer
         if (missing.length > 0) {
-          dedupePhonesMutation({}).catch(() => {});
+          dedupePhonesMutation({ instanceId: instance }).catch(() => {});
         }
       } catch {
         // Allow retry on next render if more locals appear
@@ -797,6 +823,7 @@ export function useCustomers({
     for (let i = 0; i < missing.length; i += CHUNK) {
       const slice = missing.slice(i, i + CHUNK);
       await bulkUpsertMutation({
+        instanceId: instance,
         customers: slice.map((d) => ({
           leadId: d.id,
           name: d.name,
@@ -827,184 +854,21 @@ export function useCustomers({
       });
       added += slice.length;
     }
-    dedupePhonesMutation({}).catch(() => {});
+    dedupePhonesMutation({ instanceId: instance }).catch(() => {});
     return { added, skipped: customers.length - added };
   }, [remoteCustomers, customers, bulkUpsertMutation, dedupePhonesMutation]);
 
-  // One-time integrity backfill: ensure every row from bundled CSVs exists in Convex (without overwriting existing fields)
-  const integrityBackfillRef = useRef(false);
-  useEffect(() => {
-    if (integrityBackfillRef.current) return;
-    if (!Array.isArray(remoteCustomers)) return; // wait for remote load
-    integrityBackfillRef.current = true;
-    (async () => {
-      try {
-        // Gather remote IDs into a set for quick membership checks
-        const remoteIds = new Set<string>(
-          (remoteCustomers as Array<Record<string, unknown>>).map(
-            (r) => (r.leadId as string) || (r.id as string)
-          )
-        );
-        // Helper to parse a CSV file path (if present) into canonical customer objects (lightweight)
-        async function parseCsv(path: string) {
-          try {
-            const res = await fetch(path);
-            if (!res.ok) return [] as Customer[];
-            const text = await res.text();
-            return await new Promise<Customer[]>((resolve) => {
-              Papa.parse<Record<string, unknown>>(text, {
-                header: true,
-                skipEmptyLines: true,
-                complete: (r) => {
-                  const asStr = (v: unknown) => (v ?? "").toString();
-                  const out: Customer[] = (r.data || []).map((row, idx) => {
-                    const contactRaw = asStr(row["Contact Info"]);
-                    let phone = contactRaw;
-                    let email: string | undefined;
-                    if (contactRaw.includes("|")) {
-                      const parts = contactRaw.split("|").map((p) => p.trim());
-                      parts.forEach((p) => {
-                        if (!email && /@/.test(p)) email = p;
-                      });
-                      const phoneCandidate = parts.find(
-                        (p) => /\d/.test(p) && !/@/.test(p)
-                      );
-                      phone = phoneCandidate
-                        ? phoneCandidate.replace(/\s+/g, " ")
-                        : "";
-                    } else if (/@/.test(contactRaw)) {
-                      email = contactRaw.trim();
-                      phone = "";
-                    }
-                    return {
-                      id: asStr(row["Lead ID"]) || `seed_${path}_${idx}`,
-                      name: asStr(row["Customer Name"]),
-                      phone,
-                      email,
-                      country: undefined,
-                      source: normalizeSource(
-                        asStr(
-                          row["Source (Facebook/Instagram/WhatsApp/TikTok)"]
-                        )
-                      ),
-                      dateAdded: asStr(row["Date Entered"]),
-                      firstCallDate: asStr(row["Date First Called"]),
-                      firstCallStatus: asStr(
-                        row[
-                          "First Call Status (Voicemail/Answered/Interested/Not Interested)"
-                        ]
-                      ) as Customer["firstCallStatus"],
-                      notes: asStr(row["Notes from First Call"]),
-                      secondCallDate: asStr(row["Date Second Call"]),
-                      secondCallStatus: asStr(
-                        row[
-                          "Second Call Status (They Called/We Called/Voicemail/Answered)"
-                        ]
-                      ) as Customer["secondCallStatus"],
-                      secondCallNotes: asStr(row["Second Call Notes"]),
-                      finalCallDate: asStr(row["Date Registered"]),
-                      finalStatus: asStr(
-                        row[
-                          "Final Status (Registered/Not Registered/Follow-up Needed)"
-                        ]
-                      ) as Customer["finalStatus"],
-                      finalNotes: asStr(row["Final Notes"]),
-                      pronouns: undefined,
-                      device: undefined,
-                      leadScore: undefined,
-                      lastUpdated: undefined,
-                      lastMessageSnippet: undefined,
-                      messageCount: undefined,
-                    };
-                  });
-                  resolve(out);
-                },
-              });
-            });
-          } catch {
-            return [] as Customer[];
-          }
-        }
-        const [baseCsv, latestCsv, waCsv] = await Promise.all([
-          parseCsv("/customer-data.csv"),
-          parseCsv("/latest_instagram_leads_template_import.csv"),
-          parseCsv("/whatsapp-customer-data.csv"),
-        ]);
-        // Default Instagram source for first two CSV groups if blank
-        function ensureDefaults(list: Customer[], forceInstagram = false) {
-          return list.map((c) => {
-            if (forceInstagram && !c.source) c.source = "Instagram";
-            if (!c.dateAdded || !/^\d{4}-\d{2}-\d{2}$/.test(c.dateAdded)) {
-              const fallback =
-                c.firstCallDate ||
-                c.secondCallDate ||
-                c.finalCallDate ||
-                new Date().toISOString().slice(0, 10);
-              c.dateAdded = fallback;
-            }
-            return c;
-          });
-        }
-        const combined = [
-          ...ensureDefaults(baseCsv, true),
-          ...ensureDefaults(latestCsv, true),
-          ...ensureDefaults(waCsv, false),
-        ];
-        if (!combined.length) return;
-        // Filter to those not in remote already
-        const missing = combined.filter((c) => !remoteIds.has(c.id));
-        if (!missing.length) return;
-        // Chunk upsert (reuse mapping)
-        const CHUNK = 100;
-        for (let i = 0; i < missing.length; i += CHUNK) {
-          const slice = missing.slice(i, i + CHUNK);
-          await bulkUpsertMutation({
-            customers: slice.map((d) => ({
-              leadId: d.id,
-              name: d.name,
-              phone: d.phone,
-              email: d.email,
-              country: d.country,
-              source: d.source,
-              dateAdded: d.dateAdded,
-              firstCallDate: d.firstCallDate,
-              firstCallStatus: d.firstCallStatus,
-              notes: d.notes,
-              secondCallDate: d.secondCallDate,
-              secondCallStatus: d.secondCallStatus,
-              secondCallNotes: d.secondCallNotes,
-              finalCallDate: d.finalCallDate,
-              finalStatus: d.finalStatus,
-              finalNotes: d.finalNotes,
-              pronouns: d.pronouns,
-              device: d.device,
-              leadScore: d.leadScore,
-              lastUpdated: d.lastUpdated,
-              lastMessageSnippet: d.lastMessageSnippet,
-              messageCount: d.messageCount,
-            })),
-          }).catch((err) => {
-            console.error("Integrity backfill bulkUpsert failed", err);
-            throw err;
-          });
-        }
-        dedupePhonesMutation({}).catch(() => {});
-        console.info(
-          "[Integrity Backfill] Added",
-          missing.length,
-          "missing rows from public CSV assets"
-        );
-      } catch (e) {
-        console.warn("[Integrity Backfill] Skipped due to error", e);
-        integrityBackfillRef.current = false; // allow retry on next mount if desired
-      }
-    })();
-  }, [
-    remoteCustomers,
-    normalizeSource,
-    bulkUpsertMutation,
-    dedupePhonesMutation,
-  ]);
+  // Integrity backfill disabled (removed) to prevent reintroduction of placeholder/empty leads from public CSV assets.
+
+  // Expose a manual reseed (rarely needed) and on-demand dedupe for imports
+  const manualReseedFromCsv = useCallback(async () => {
+    if (remoteCustomers && remoteCustomers.length > 0) return; // safety: only when empty
+    seededRef.current = false; // allow seeding logic to run again
+  }, [remoteCustomers]);
+
+  const runDedupe = useCallback(() => {
+    return dedupePhonesMutation({ instanceId: instance }).catch(() => {});
+  }, [dedupePhonesMutation, instance]);
 
   return {
     customers,
@@ -1013,7 +877,8 @@ export function useCustomers({
     bulkUpdate,
     addCustomer,
     removeCustomer,
-    dedupePhones: () => dedupePhonesMutation({}).catch(() => {}),
+    dedupePhones: runDedupe,
+    manualReseedFromCsv,
     undo,
     redo,
     canUndo,

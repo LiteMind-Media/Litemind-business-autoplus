@@ -5,54 +5,86 @@ import { Customer, SOURCE_OPTIONS, FINAL_STATUS_OPTIONS } from "@/types/customer
 
 type Props = {
     data: Customer[];
-    remoteCount?: number; // raw rows in Convex
-    localCount?: number;  // local session rows
-    uniquePhoneCount?: number; // deduped by phone
+    remoteCount?: number; // raw row count from Convex
+    localCount?: number;  // local session rows (unsynced imports etc.)
+    uniquePhoneCount?: number; // server-side / precomputed unique phone count (optional)
 };
 
 export default function AnalyticsOverview({ data, remoteCount, localCount, uniquePhoneCount }: Props) {
-    const stats = useMemo(() => {
-        const total = data.length;
-        const needFirstContact = data.filter(c => !c.firstCallDate).length;
-        const needFirstCallStatus = data.filter(c => c.firstCallDate && !c.firstCallStatus).length;
-        const needSecondContact = data.filter(c => !c.secondCallDate && !c.secondCallStatus).length;
-        const registered = data.filter(c => c.finalStatus === 'Registered').length;
-        const notRegistered = data.filter(c => c.finalStatus === 'Not Registered').length;
-        const followUp = data.filter(c => c.finalStatus === 'Follow-up Needed').length;
-
-        const bySource = SOURCE_OPTIONS.reduce<Record<string, number>>((acc, s) => {
-            acc[s] = data.filter(c => c.source === s).length;
-            return acc;
-        }, {});
-
-        const byFinal = FINAL_STATUS_OPTIONS.reduce<Record<string, number>>((acc, s) => {
-            acc[s] = data.filter(c => c.finalStatus === s).length;
-            return acc;
-        }, {});
-
-        return { total, needFirstContact, needFirstCallStatus, needSecondContact, registered, notRegistered, followUp, bySource, byFinal };
+    // Helper: normalize phone for dedupe (digits only). Blank/short (<5 digits) treated as distinct by id fallback.
+    const normalizePhone = (p?: string) => (p || '').replace(/[^0-9]/g, '');
+    const { uniqueData, duplicatesByPhone } = useMemo(() => {
+        const map = new Map<string, Customer & { __merged?: Customer[] }>();
+        const dups: Record<string, Customer[]> = {};
+        for (const c of data) {
+            const np = normalizePhone(c.phone);
+            const key = np && np.length >= 5 ? `p:${np}` : `id:${c.id}`; // fallback to id when phone unusable
+            if (!map.has(key)) {
+                map.set(key, { ...c, __merged: [c] });
+            } else {
+                const existing = map.get(key)!;
+                existing.__merged!.push(c);
+                // Heuristic: prefer record with finalStatus Registered, else with later dateAdded, else keep existing
+                const existingScore = (existing.finalStatus === 'Registered' ? 3 : existing.secondCallDate ? 2 : existing.firstCallDate ? 1 : 0);
+                const candidateScore = (c.finalStatus === 'Registered' ? 3 : c.secondCallDate ? 2 : c.firstCallDate ? 1 : 0);
+                if (candidateScore > existingScore) {
+                    map.set(key, { ...c, __merged: existing.__merged });
+                } else if (candidateScore === existingScore) {
+                    // Tie-breaker: latest dateAdded wins
+                    if ((c.dateAdded || '') > (existing.dateAdded || '')) map.set(key, { ...c, __merged: existing.__merged });
+                }
+            }
+        }
+        for (const [k, v] of map.entries()) {
+            if (v.__merged && v.__merged.length > 1) {
+                dups[k] = v.__merged;
+            }
+        }
+        return { uniqueData: Array.from(map.values()), duplicatesByPhone: dups };
     }, [data]);
+
+    const stats = useMemo(() => {
+        const total = uniqueData.length;
+        const needFirstContact = uniqueData.filter(c => !c.firstCallDate).length;
+        const needFirstCallStatus = uniqueData.filter(c => c.firstCallDate && !c.firstCallStatus).length;
+        const needSecondContact = uniqueData.filter(c => !c.secondCallDate && !c.secondCallStatus).length;
+        const registered = uniqueData.filter(c => c.finalStatus === 'Registered').length;
+        const notRegistered = uniqueData.filter(c => c.finalStatus === 'Not Registered').length;
+        const followUp = uniqueData.filter(c => c.finalStatus === 'Follow-up Needed').length;
+        const bySource = SOURCE_OPTIONS.reduce<Record<string, number>>((acc, s) => {
+            acc[s] = uniqueData.filter(c => c.source === s).length;
+            return acc;
+        }, {});
+        const byFinal = FINAL_STATUS_OPTIONS.reduce<Record<string, number>>((acc, s) => {
+            acc[s] = uniqueData.filter(c => c.finalStatus === s).length;
+            return acc;
+        }, {});
+        return { total, needFirstContact, needFirstCallStatus, needSecondContact, registered, notRegistered, followUp, bySource, byFinal };
+    }, [uniqueData]);
 
     const sourceSeries = SOURCE_OPTIONS.map(label => ({ label, value: stats.bySource[label] })).filter(s => s.value > 0);
     const finalSeries = FINAL_STATUS_OPTIONS.map(label => ({ label, value: stats.byFinal[label] })).filter(s => s.value > 0);
 
     const showCountsBar = remoteCount !== undefined || localCount !== undefined || uniquePhoneCount !== undefined;
-    const diff = (remoteCount !== undefined && localCount !== undefined) ? localCount - remoteCount : 0;
+    const diff = (remoteCount !== undefined && localCount !== undefined) ? localCount - remoteCount : 0; // local minus remote (unsynced delta)
     return (
         <div className="space-y-10">
             {showCountsBar && (
                 <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-white/70 border border-gray-200 text-[11px] font-medium">
-                    {remoteCount !== undefined && <span className="px-2 py-1 rounded-lg bg-gray-900 text-white font-semibold">Cloud {remoteCount.toLocaleString()}</span>}
-                    {localCount !== undefined && <span className="px-2 py-1 rounded-lg bg-gray-100 text-gray-800 font-semibold">Local {localCount.toLocaleString()}</span>}
-                    {uniquePhoneCount !== undefined && <span className="px-2 py-1 rounded-lg bg-blue-50 text-blue-700 font-semibold">Unique Phones {uniquePhoneCount.toLocaleString()}</span>}
-                    {remoteCount !== undefined && localCount !== undefined && diff !== 0 && (
-                        <span className={`px-2 py-1 rounded-lg font-semibold ${diff > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{diff > 0 ? '+' + diff : diff} session delta</span>
+                    {remoteCount !== undefined && <span className="px-2 py-1 rounded-lg bg-gray-900 text-white font-semibold" title="Raw rows stored (may include duplicates)">Cloud Rows {remoteCount.toLocaleString()}</span>}
+                    <span className="px-2 py-1 rounded-lg bg-blue-600/10 text-blue-700 font-semibold" title="Unique leads by normalized phone">Unique Leads {stats.total.toLocaleString()}</span>
+                    {uniquePhoneCount !== undefined && remoteCount !== undefined && (
+                        <span className="px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 font-semibold" title="Server-side unique phone count (for cross-check)">Srv Unique {uniquePhoneCount.toLocaleString()}</span>
                     )}
-                    <span className="ml-auto text-[10px] opacity-70">Cloud rows = authoritative stored leads; Local may include just-imported rows pending sync / dedupe.</span>
+                    {localCount !== undefined && <span className="px-2 py-1 rounded-lg bg-gray-100 text-gray-800 font-semibold" title="Local (unsynced) rows">Local {localCount.toLocaleString()}</span>}
+                    {remoteCount !== undefined && stats.total !== undefined && (remoteCount - stats.total) > 0 && (
+                        <span className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 font-semibold" title="Raw duplicate rows (not counted in Unique Leads)">Duplicates {(remoteCount - stats.total).toLocaleString()}</span>
+                    )}
+                    <span className="ml-auto text-[10px] opacity-70 text-gray-600">Metrics & charts use Unique Leads (deduped by phone). Duplicates excluded from totals.</span>
                 </div>
             )}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-                <Stat title="Total Leads" value={stats.total} variant="primary" />
+                <Stat title="Unique Leads" value={stats.total} variant="primary" />
                 <Stat title="Need 1st Contact" value={stats.needFirstContact} variant="warning" />
                 <Stat title="Need 1st Status" value={stats.needFirstCallStatus} variant="amber" />
                 <Stat title="Need 2nd Contact" value={stats.needSecondContact} variant="indigo" />
@@ -85,6 +117,19 @@ export default function AnalyticsOverview({ data, remoteCount, localCount, uniqu
                 <SourceConversionPanel data={data} />
             </div>
             <StageVelocityPanel data={data} />
+            {Object.keys(duplicatesByPhone).length > 0 && (
+                <div className="mt-10 p-4 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 space-y-3">
+                    <div className="font-semibold flex items-center gap-2">Duplicate Phone Groups <span className="px-2 py-0.5 rounded-md bg-amber-100 font-bold">{Object.keys(duplicatesByPhone).length}</span></div>
+                    <p className="opacity-80">Below are up to first 10 duplicate groups (normalized phone) collapsed in analytics. Higher-scoring record retained; others ignored for metrics.</p>
+                    <ul className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+                        {Object.entries(duplicatesByPhone).slice(0, 10).map(([k, arr]) => (
+                            <li key={k} className="p-2 rounded-lg bg-white/70 border border-amber-200/60">{k.replace(/^p:/,'')} <span className="ml-1 px-1.5 rounded bg-amber-100 font-semibold">{arr.length}</span></li>
+                        ))}
+                    </ul>
+                    {Object.keys(duplicatesByPhone).length > 10 && <div className="opacity-60">{Object.keys(duplicatesByPhone).length - 10} more not shown…</div>}
+                    {diff !== 0 && <div className="opacity-60">Local diff: {diff > 0 ? '+' + diff : diff}</div>}
+                </div>
+            )}
         </div>
     );
 }
@@ -540,7 +585,7 @@ function DailyProgressPanel({ data }: { data: Customer[] }) {
                             const raw = scaleMax - (scaleMax / 4) * i;
                             const val = mode === 'percent' ? Math.round(raw) + '%' : Math.round(raw);
                             return (
-                                <g key={i}>
+                                <g key={`daily-y-${i}`}>
                                     <line x1={0} x2={chartWidth} y1={y} y2={y} stroke="#e5e7eb" strokeDasharray="2 4" />
                                     <text x={0} y={y + 10} fontSize={10} fill="#6b7280">{val}</text>
                                 </g>
@@ -802,7 +847,7 @@ function MonthlyProgressPanel({ data }: { data: Customer[] }) {
                     <svg width={chartWidth} height={chartHeight + 60} role="img" aria-label={`Monthly stacked bar chart (${range})`}>
                         {Array.from({ length: 5 }).map((_, i) => {
                             const y = (chartHeight / 4) * i; const raw = scaleMax - (scaleMax / 4) * i; const val = mode === 'percent' ? Math.round(raw) + '%' : Math.round(raw);
-                            return <g key={i}><line x1={0} x2={chartWidth} y1={y} y2={y} stroke="#e5e7eb" strokeDasharray="2 4" /><text x={0} y={y + 10} fontSize={10} fill="#6b7280">{val}</text></g>;
+                            return <g key={`monthly-y-${i}`}><line x1={0} x2={chartWidth} y1={y} y2={y} stroke="#e5e7eb" strokeDasharray="2 4" /><text x={0} y={y + 10} fontSize={10} fill="#6b7280">{val}</text></g>;
                         })}
                         {stacks.map((s, idx) => {
                             const x = 60 + idx * (barWidth + gap);

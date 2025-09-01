@@ -5,13 +5,14 @@
 // TODO: Reintegrate full functionality or extract shared hooks.
 
 import CustomerTable from "@/components/CustomerTable";
+import BrandColorSettings from "@/components/BrandColorSettings";
 import CustomerCards from "@/components/CustomerCards";
 import CustomerCardsGrouped from "@/components/CustomerCardsGrouped";
 import KanbanPipeline from "@/components/KanbanPipeline";
 import CustomerModal from "@/components/CustomerModal";
 import AnalyticsOverview from "@/components/AnalyticsOverview";
 import { Customer, SOURCE_OPTIONS, FINAL_STATUS_OPTIONS, FIRST_CALL_STATUS_OPTIONS, SECOND_CALL_STATUS_OPTIONS } from "@/types/customer";
-import { Search, Filter, Download, CheckSquare, Square } from 'lucide-react';
+import { Search, Filter, Download, CheckSquare, Square, SlidersHorizontal, X } from 'lucide-react';
 import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
 import Papa from 'papaparse';
 import { useMutation } from 'convex/react';
@@ -79,6 +80,28 @@ export default function ParlayProzInstance() {
         clearSelection();
     }, [view, clearSelection]);
     const [search, setSearch] = useState('');
+    const [showTools, setShowTools] = useState(false);
+    // Sidebar animation + accessibility
+    const [toolsActive, setToolsActive] = useState(false); // becomes true one frame after mount for CSS transitions
+    const undoBtnRef = useRef<HTMLButtonElement | null>(null);
+    useEffect(() => {
+        if (showTools) {
+            // next frame so initial translate state applies
+            const id = requestAnimationFrame(() => setToolsActive(true));
+            // focus first actionable control for accessibility
+            setTimeout(() => { undoBtnRef.current?.focus(); }, 120);
+            const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowTools(false); };
+            window.addEventListener('keydown', onKey);
+            return () => { cancelAnimationFrame(id); window.removeEventListener('keydown', onKey); };
+        } else {
+            // allow transition-out to play before fully resetting active state
+            const t = setTimeout(() => setToolsActive(false), 320);
+            return () => clearTimeout(t);
+        }
+    }, [showTools]);
+    // Sorting (requested): progress, name, dateAdded, leadNumber (global index). No phone / registered sort.
+    const [sortKey, setSortKey] = useState<'progress' | 'name' | 'dateAdded' | 'leadNumber'>('dateAdded');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
     const [anchorFilter, setAnchorFilter] = useState(false);
     const [filterSource, setFilterSource] = useState<string>('');
     const [filterFinal, setFilterFinal] = useState<string>('');
@@ -92,6 +115,8 @@ export default function ParlayProzInstance() {
     // Brand identity (name, logo, favicon) with local persistence
     const [brandName, setBrandName] = useState<string>('Parlay Proz');
     const [brandLogoHorizontal, setBrandLogoHorizontal] = useState<string>('');
+    // Dark mode horizontal logo (optional)
+    const [brandLogoHorizontalDark, setBrandLogoHorizontalDark] = useState<string>('');
     const [brandLogoVertical, setBrandLogoVertical] = useState<string>('');
     const [brandLogoIcon, setBrandLogoIcon] = useState<string>('');
     const [brandLogoVariant, setBrandLogoVariant] = useState<'text' | 'horizontal' | 'vertical' | 'icon' | 'icon-text'>('text');
@@ -103,7 +128,55 @@ export default function ParlayProzInstance() {
     const [domainFormEndpoint, setDomainFormEndpoint] = useState<string>('');
     const [domainApiBase, setDomainApiBase] = useState<string>('');
     const [hydratedBrand, setHydratedBrand] = useState(false);
-    const { brand: remoteBrand, setBrand: saveRemoteBrand } = useBrandSettings();
+    const instanceId = 'parlay-pros';
+    const { brand: remoteBrand, setBrand: saveRemoteBrandBase } = useBrandSettings(instanceId);
+    // Brand dirty & synchronization guards
+    const localBrandDirtyRef = useRef(false); // user edited locally since last successful remote save
+    const lastAppliedRemoteBrandUpdatedAt = useRef<string | null>(null); // which remote updatedAt we last applied to local state
+    const lastSentBrandHashRef = useRef<string | null>(null); // avoid redundant mutation spam
+    const markBrandDirty = () => { localBrandDirtyRef.current = true; };
+    type BrandSavePayload = {
+        name?: string; logoHorizontal?: string; logoHorizontalDark?: string; logoVertical?: string; logoIcon?: string; faviconData?: string;
+        logoVariant?: 'text' | 'horizontal' | 'vertical' | 'icon' | 'icon-text'; logoSize?: number;
+        domainPrimary?: string; domainLanding?: string; domainFormEndpoint?: string; domainApiBase?: string;
+    };
+    const saveRemoteBrand = useCallback(async (payload: BrandSavePayload) => {
+        try {
+            await saveRemoteBrandBase(payload);
+            // On success, clear dirty flag & remember hash
+            localBrandDirtyRef.current = false;
+            try { lastSentBrandHashRef.current = JSON.stringify(payload); } catch { }
+    } catch (_ignore) {
+            // Leave dirty flag set so remote won't overwrite during user edits
+        }
+    }, [saveRemoteBrandBase]);
+    const [brandSaveStatus, setBrandSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const [brandSaveError, setBrandSaveError] = useState<string | null>(null);
+    const forceSaveBrand = useCallback(() => {
+        const payload: BrandSavePayload = {
+            name: brandName,
+            logoHorizontal: brandLogoHorizontal || undefined,
+            logoHorizontalDark: brandLogoHorizontalDark || undefined,
+            logoVertical: brandLogoVertical || undefined,
+            logoIcon: brandLogoIcon || undefined,
+            faviconData: brandFavicon || undefined,
+            logoVariant: brandLogoVariant,
+            logoSize: brandLogoSize,
+            domainPrimary: domainPrimary || undefined,
+            domainLanding: domainLanding || undefined,
+            domainFormEndpoint: domainFormEndpoint || undefined,
+            domainApiBase: domainApiBase || undefined,
+        };
+        setBrandSaveStatus('saving'); setBrandSaveError(null);
+        saveRemoteBrand(payload).then(() => {
+            setBrandSaveStatus('saved');
+            setTimeout(() => setBrandSaveStatus(s => s === 'saved' ? 'idle' : s), 2000);
+        }).catch((e: unknown) => {
+            const err = (e as { message?: string }) || {};
+            setBrandSaveStatus('error'); setBrandSaveError(err.message || 'Save failed');
+            setTimeout(() => setBrandSaveStatus('idle'), 4000);
+        });
+    }, [brandName, brandLogoHorizontal, brandLogoHorizontalDark, brandLogoVertical, brandLogoIcon, brandFavicon, brandLogoVariant, brandLogoSize, domainPrimary, domainLanding, domainFormEndpoint, domainApiBase, saveRemoteBrand]);
     // Merge: prefer remote once loaded; local acts as bootstrap. If remote empty and we have local, push it once.
     const pushedRemoteRef = useRef(false);
     useLayoutEffect(() => {
@@ -111,6 +184,7 @@ export default function ParlayProzInstance() {
         try {
             const n = localStorage.getItem('pp_brand_name'); if (n) setBrandName(n);
             const lh = localStorage.getItem('pp_brand_logo_horizontal'); if (lh) setBrandLogoHorizontal(lh);
+            const lhd = localStorage.getItem('pp_brand_logo_horizontal_dark'); if (lhd) setBrandLogoHorizontalDark(lhd);
             const lv = localStorage.getItem('pp_brand_logo_vertical'); if (lv) setBrandLogoVertical(lv);
             const li = localStorage.getItem('pp_brand_logo_icon'); if (li) setBrandLogoIcon(li);
             const lvSel = localStorage.getItem('pp_brand_logo_variant'); if (lvSel && ['horizontal', 'vertical', 'icon', 'text', 'icon-text'].includes(lvSel)) setBrandLogoVariant(lvSel as typeof brandLogoVariant);
@@ -129,9 +203,34 @@ export default function ParlayProzInstance() {
     // Apply remote brand when available
     useEffect(() => {
         if (!remoteBrand) return;
-        if (remoteBrand.name && remoteBrand.name !== brandName) setBrandName(remoteBrand.name);
-        // (logos & favicon future: remote fields)
-    }, [remoteBrand, brandName]);
+        if (!hydratedBrand) return;
+        // If we've already applied this remote version, skip
+        interface RemoteBrand {
+            updatedAt?: string; name?: string;
+            logoHorizontal?: string; logoHorizontalDark?: string; logoVertical?: string; logoIcon?: string; faviconData?: string;
+            logoVariant?: 'text' | 'horizontal' | 'vertical' | 'icon' | 'icon-text'; logoSize?: number;
+            domainPrimary?: string; domainLanding?: string; domainFormEndpoint?: string; domainApiBase?: string;
+        }
+        const remote = remoteBrand as RemoteBrand;
+        const remoteUpdated = remote.updatedAt;
+        if (remoteUpdated && remoteUpdated === lastAppliedRemoteBrandUpdatedAt.current) return;
+        // If user has unsaved local edits, don't overwrite (remote hasn't advanced)
+        if (localBrandDirtyRef.current && remoteUpdated && remoteUpdated === lastAppliedRemoteBrandUpdatedAt.current) return;
+        // Apply remote snapshot (single pass) then record updatedAt
+        if (remote.name && remote.name !== brandName && !localBrandDirtyRef.current) setBrandName(remote.name);
+        if (remote.logoHorizontal && remote.logoHorizontal !== brandLogoHorizontal && !localBrandDirtyRef.current) setBrandLogoHorizontal(remote.logoHorizontal || '');
+        if (remote.logoHorizontalDark && remote.logoHorizontalDark !== brandLogoHorizontalDark && !localBrandDirtyRef.current) setBrandLogoHorizontalDark(remote.logoHorizontalDark || '');
+        if (remote.logoVertical && remote.logoVertical !== brandLogoVertical && !localBrandDirtyRef.current) setBrandLogoVertical(remote.logoVertical || '');
+        if (remote.logoIcon && remote.logoIcon !== brandLogoIcon && !localBrandDirtyRef.current) setBrandLogoIcon(remote.logoIcon || '');
+        if (remote.faviconData && remote.faviconData !== brandFavicon && !localBrandDirtyRef.current) setBrandFavicon(remote.faviconData || '');
+        if (remote.logoVariant && remote.logoVariant !== brandLogoVariant && !localBrandDirtyRef.current) setBrandLogoVariant(remote.logoVariant);
+        if (typeof remote.logoSize === 'number' && remote.logoSize !== brandLogoSize && !localBrandDirtyRef.current) setBrandLogoSize(remote.logoSize);
+        if (remote.domainPrimary && remote.domainPrimary !== domainPrimary && !localBrandDirtyRef.current) setDomainPrimary(remote.domainPrimary || '');
+        if (remote.domainLanding && remote.domainLanding !== domainLanding && !localBrandDirtyRef.current) setDomainLanding(remote.domainLanding || '');
+        if (remote.domainFormEndpoint && remote.domainFormEndpoint !== domainFormEndpoint && !localBrandDirtyRef.current) setDomainFormEndpoint(remote.domainFormEndpoint || '');
+        if (remote.domainApiBase && remote.domainApiBase !== domainApiBase && !localBrandDirtyRef.current) setDomainApiBase(remote.domainApiBase || '');
+        if (remoteUpdated) lastAppliedRemoteBrandUpdatedAt.current = remoteUpdated;
+    }, [remoteBrand, hydratedBrand, brandName, brandLogoHorizontal, brandLogoHorizontalDark, brandLogoVertical, brandLogoIcon, brandFavicon, brandLogoVariant, brandLogoSize, domainPrimary, domainLanding, domainFormEndpoint, domainApiBase]);
     // Push local bootstrap to remote once if remote absent
     useEffect(() => {
         if (pushedRemoteRef.current) return;
@@ -146,6 +245,7 @@ export default function ParlayProzInstance() {
         try {
             localStorage.setItem('pp_brand_name', brandName || '');
             if (brandLogoHorizontal) localStorage.setItem('pp_brand_logo_horizontal', brandLogoHorizontal); else localStorage.removeItem('pp_brand_logo_horizontal');
+            if (brandLogoHorizontalDark) localStorage.setItem('pp_brand_logo_horizontal_dark', brandLogoHorizontalDark); else localStorage.removeItem('pp_brand_logo_horizontal_dark');
             if (brandLogoVertical) localStorage.setItem('pp_brand_logo_vertical', brandLogoVertical); else localStorage.removeItem('pp_brand_logo_vertical');
             if (brandLogoIcon) localStorage.setItem('pp_brand_logo_icon', brandLogoIcon); else localStorage.removeItem('pp_brand_logo_icon');
             localStorage.setItem('pp_brand_logo_variant', brandLogoVariant);
@@ -156,8 +256,27 @@ export default function ParlayProzInstance() {
             if (domainFormEndpoint) localStorage.setItem('pp_domain_form', domainFormEndpoint); else localStorage.removeItem('pp_domain_form');
             if (domainApiBase) localStorage.setItem('pp_domain_api', domainApiBase); else localStorage.removeItem('pp_domain_api');
         } catch { /* ignore storage errors */ }
-        saveRemoteBrand({ name: brandName }).catch(() => { });
-    }, [brandName, brandLogoHorizontal, brandLogoVertical, brandLogoIcon, brandLogoVariant, brandLogoSize, brandFavicon, domainPrimary, domainLanding, domainFormEndpoint, domainApiBase, saveRemoteBrand]);
+        // Remote persistence (debounced minimal) for brand identity
+        const payload = {
+            name: brandName,
+            logoHorizontal: brandLogoHorizontal || undefined,
+            logoHorizontalDark: brandLogoHorizontalDark || undefined,
+            logoVertical: brandLogoVertical || undefined,
+            logoIcon: brandLogoIcon || undefined,
+            faviconData: brandFavicon || undefined,
+            logoVariant: brandLogoVariant,
+            logoSize: brandLogoSize,
+            domainPrimary: domainPrimary || undefined,
+            domainLanding: domainLanding || undefined,
+            domainFormEndpoint: domainFormEndpoint || undefined,
+            domainApiBase: domainApiBase || undefined,
+        };
+        let hash = '';
+        try { hash = JSON.stringify(payload); } catch { }
+        if (lastSentBrandHashRef.current === hash) return; // no changes since last successful send
+        const id = setTimeout(() => { saveRemoteBrand(payload).catch(() => { }); }, 500);
+        return () => clearTimeout(id);
+    }, [brandName, brandLogoHorizontal, brandLogoHorizontalDark, brandLogoVertical, brandLogoIcon, brandLogoVariant, brandLogoSize, brandFavicon, domainPrimary, domainLanding, domainFormEndpoint, domainApiBase, saveRemoteBrand]);
     // Update document title & favicon dynamically
     useEffect(() => { document.title = (brandName ? brandName : 'Parlay Proz') + ' Dashboard'; }, [brandName]);
     useEffect(() => {
@@ -183,8 +302,36 @@ export default function ParlayProzInstance() {
         if (filterFinal) list = list.filter(c => c.finalStatus === filterFinal);
         if (filterFirstCall) list = list.filter(c => c.firstCallStatus === filterFirstCall);
         if (filterSecondCall) list = list.filter(c => c.secondCallStatus === filterSecondCall);
+        // Sorting logic
+        const leadNumbersMap = computeLeadNumbers(customers); // global mapping unaffected by filter
+        const progressScore = (c: Customer) => {
+            let s = 0;
+            if (c.firstCallStatus) s += 1;
+            if (c.secondCallStatus) s += 1;
+            if (c.finalStatus) s += (c.finalStatus === 'Registered' ? 2 : 1);
+            return s; // higher = further along
+        };
+        const cmp = (a: Customer, b: Customer): number => {
+            let va: string | number = 0; let vb: string | number = 0;
+            switch (sortKey) {
+                case 'progress':
+                    va = progressScore(a); vb = progressScore(b); break;
+                case 'name':
+                    va = (a.name || '').toLowerCase(); vb = (b.name || '').toLowerCase(); break;
+                case 'dateAdded':
+                    va = a.dateAdded || ''; vb = b.dateAdded || ''; break;
+                case 'leadNumber':
+                    va = leadNumbersMap[a.id] || 0; vb = leadNumbersMap[b.id] || 0; break;
+                default:
+                    va = 0; vb = 0;
+            }
+            if (va < vb) return sortDir === 'asc' ? -1 : 1;
+            if (va > vb) return sortDir === 'asc' ? 1 : -1;
+            return 0;
+        };
+        list.sort(cmp);
         return list;
-    }, [customers, search, filterSource, filterFinal, filterFirstCall, filterSecondCall]);
+    }, [customers, search, filterSource, filterFinal, filterFirstCall, filterSecondCall, sortKey, sortDir]);
     // Clamp table page index if filtered results shrink below current page start
     useEffect(() => {
         if (view !== 'table') return; // only relevant in table view
@@ -197,8 +344,8 @@ export default function ParlayProzInstance() {
     const registered = useMemo(() => metrics.registered, [metrics]);
 
     // Theme (local) + remote sync
-    const { theme, ready: themeReady, updateTheme: updateThemeLocal, setPreset: setPresetLocal, presets, customStatusColors, updateStatusColor, exportTheme, importTheme } = useTheme();
-    const { themeSettings, setTheme: saveThemeRemote } = useThemeSettings();
+    const { theme, ready: themeReady, updateTheme: updateThemeLocal, setPreset: setPresetLocal, presets, customStatusColors, updateStatusColor, exportTheme, importTheme, toggleMode } = useTheme();
+    const { themeSettings, setTheme: saveThemeRemote } = useThemeSettings(instanceId);
     const themePushedRef = useRef(false);
     const lastLocalThemeChangeRef = useRef<string | null>(null);
 
@@ -212,12 +359,13 @@ export default function ParlayProzInstance() {
         // push full theme to remote (fire and forget)
         saveThemeRemote({
             from: next.from, via: next.via, to: next.to, background: next.background, cardBg: next.cardBg, mutedBg: next.mutedBg, border: next.border,
-            primaryText: next.primaryText, secondaryText: next.secondaryText, sidebarText: next.sidebarText, headerText: next.headerText
+            primaryText: next.primaryText, secondaryText: next.secondaryText, sidebarText: next.sidebarText, headerText: next.headerText, mode: next.mode,
+            backgroundRadialCenter: next.backgroundRadialCenter, backgroundRadialEdge: next.backgroundRadialEdge
         }).catch(() => { });
     }, [theme, updateThemeLocal, saveThemeRemote]);
 
     // Status color remote sync (defer helper definitions until just before render for clarity later)
-    const { statusColors: remoteStatusColors, setStatusColor: saveStatusColorRemote } = useStatusColors();
+    const { statusColors: remoteStatusColors, setStatusColor: saveStatusColorRemote } = useStatusColors(instanceId);
     const statusPushedRef = useRef(false);
 
     const setPreset = useCallback((key: string) => {
@@ -228,7 +376,8 @@ export default function ParlayProzInstance() {
         setPresetLocal(key);
         saveThemeRemote({
             from: preset.from, via: preset.via, to: preset.to, background: preset.background, cardBg: preset.cardBg, mutedBg: preset.mutedBg, border: preset.border,
-            primaryText: preset.primaryText, secondaryText: preset.secondaryText, sidebarText: preset.sidebarText, headerText: preset.headerText
+            primaryText: preset.primaryText, secondaryText: preset.secondaryText, sidebarText: preset.sidebarText, headerText: preset.headerText, mode: preset.mode,
+            backgroundRadialCenter: preset.backgroundRadialCenter, backgroundRadialEdge: preset.backgroundRadialEdge
         }).catch(() => { });
         // We'll regenerate status colors after helper definitions (flag via ref)
         statusPaletteNeedsRegenerationRef.current = true;
@@ -241,7 +390,8 @@ export default function ParlayProzInstance() {
             // push current theme to remote
             saveThemeRemote({
                 from: theme.from, via: theme.via, to: theme.to, background: theme.background, cardBg: theme.cardBg, mutedBg: theme.mutedBg, border: theme.border,
-                primaryText: theme.primaryText, secondaryText: theme.secondaryText, sidebarText: theme.sidebarText, headerText: theme.headerText
+                primaryText: theme.primaryText, secondaryText: theme.secondaryText, sidebarText: theme.sidebarText, headerText: theme.headerText, mode: theme.mode,
+                backgroundRadialCenter: theme.backgroundRadialCenter, backgroundRadialEdge: theme.backgroundRadialEdge
             }).catch(() => { });
             themePushedRef.current = true;
             return;
@@ -252,13 +402,14 @@ export default function ParlayProzInstance() {
                 return; // local newer; remote update pending or in-flight
             }
             // if remote differs (and not newer local), update local theme (without marking as local change)
-            const themeKeys: (keyof BrandTheme)[] = ['from', 'via', 'to', 'background', 'cardBg', 'mutedBg', 'border', 'primaryText', 'secondaryText', 'sidebarText', 'headerText'];
+            const themeKeys: (keyof BrandTheme)[] = ['from', 'via', 'to', 'background', 'cardBg', 'mutedBg', 'border', 'primaryText', 'secondaryText', 'sidebarText', 'headerText', 'mode', 'backgroundRadialCenter', 'backgroundRadialEdge'];
             const diff = themeKeys.some(k => theme[k] !== (themeSettings as unknown as Record<string, string>)[k]);
             if (diff) {
                 updateThemeLocal({
                     from: themeSettings.from, via: themeSettings.via, to: themeSettings.to, background: themeSettings.background, cardBg: themeSettings.cardBg,
                     mutedBg: themeSettings.mutedBg, border: themeSettings.border, primaryText: themeSettings.primaryText, secondaryText: themeSettings.secondaryText,
-                    sidebarText: themeSettings.sidebarText, headerText: themeSettings.headerText
+                    sidebarText: themeSettings.sidebarText, headerText: themeSettings.headerText, mode: (themeSettings.mode === 'dark' ? 'dark' : themeSettings.mode === 'light' ? 'light' : undefined),
+                    backgroundRadialCenter: themeSettings.backgroundRadialCenter, backgroundRadialEdge: themeSettings.backgroundRadialEdge
                 });
             }
         }
@@ -310,7 +461,8 @@ export default function ParlayProzInstance() {
             statusPaletteNeedsRegenerationRef.current = false;
         }
     }, [regenerateStatusPalette]);
-    const darkMode = theme.key === 'black';
+    // Determine dark mode from explicit mode flag (fallback to legacy preset key for backward compatibility)
+    const darkMode = theme.mode === 'dark' || (!theme.mode && theme.key === 'black');
     const leadControlViewsList = ['table', 'grouped', 'registered', 'kanban'] as const;
     const leadControlViews = new Set(leadControlViewsList);
     const showLeadControls = leadControlViews.has(view as typeof leadControlViewsList[number]);
@@ -318,7 +470,7 @@ export default function ParlayProzInstance() {
     const showJumpTo = new Set(jumpToViewsList).has(view as typeof jumpToViewsList[number]);
     // Jump-to-date state (used for Daily Leads vs Registrations chart highlighting / scroll)
     const [jumpDate, setJumpDate] = useState<string>('');
-    const [showJumpPicker, setShowJumpPicker] = useState(false);
+    // Jump picker UI lives inside SettingsPanel now; state localized there. (Removed local showJumpPickerState.)
     // When jumpDate changes, attempt smooth scroll to element id
     useEffect(() => {
         if (!jumpDate) return;
@@ -330,49 +482,39 @@ export default function ParlayProzInstance() {
             setTimeout(() => { el.classList.remove('ring-2', 'ring-[var(--brand-from)]'); }, 1800);
         }
     }, [jumpDate]);
-    // Hydration-safe theme variables: use server-known defaults until themeReady to avoid mismatch
-    const fallbackTheme = { from: '#FCC843', via: '#F8B846', to: '#F59E0B', text: '#1a1026', background: '#F9FAFB', sidebarText: '#1a1026', headerText: '#1a1026' };
-    const tv = themeReady ? theme : fallbackTheme;
+    // Theme variables now applied instantly via inline head script; use current theme directly.
+    const radialCenter = (theme.backgroundRadialCenter || theme.background);
+    const radialEdge = (theme.backgroundRadialEdge || 'transparent');
     return (
-        <main suppressHydrationWarning className={`min-h-screen font-sans flex ${darkMode ? 'bg-[#0F1115] text-white' : 'bg-[radial-gradient(circle_at_30%_20%,var(--brand-bg),transparent_60%)] bg-gradient-to-br from-white via-[var(--brand-bg)] to-[var(--brand-bg)]'}`}
+        <main suppressHydrationWarning className={`min-h-screen font-sans flex ${darkMode ? 'text-white bg-[#0F1115]' : ''}`}
             style={{
-                ['--brand-from' as string]: tv.from,
-                ['--brand-via' as string]: tv.via,
-                ['--brand-to' as string]: tv.to,
-                ['--brand-text' as string]: tv.text,
-                ['--brand-bg' as string]: tv.background,
-                ['--brand-sidebar-text' as string]: tv.sidebarText,
-                ['--brand-header-text' as string]: tv.headerText
+                ['--brand-from' as string]: theme.from,
+                ['--brand-via' as string]: theme.via,
+                ['--brand-to' as string]: theme.to,
+                ['--brand-text' as string]: theme.text,
+                ['--brand-bg' as string]: theme.background,
+                ['--brand-radial-center' as string]: radialCenter,
+                ['--brand-radial-edge' as string]: radialEdge,
+                background: darkMode ? undefined : `radial-gradient(circle at 30% 20%, ${radialCenter}, ${radialEdge} 60%), linear-gradient(to bottom right, #ffffff, ${theme.background}, ${theme.background})`,
+                ['--brand-sidebar-text' as string]: theme.sidebarText,
+                ['--brand-header-text' as string]: theme.headerText
             } as React.CSSProperties}>
-            {!themeReady && (
-                <div className="fixed inset-0 z-[999] flex items-center justify-center bg-white dark:bg-[#0F1115] transition-opacity">
-                    <div className="flex flex-col items-center gap-4">
-                        <div className="relative w-24 h-24">
-                            <div className="absolute inset-0 rounded-full border-[6px] border-t-transparent animate-spin" style={{ borderColor: 'var(--brand-from)', borderTopColor: 'transparent' }} />
-                            <div className="absolute inset-3 rounded-full border-[6px] border-b-transparent animate-[spin_1.6s_linear_infinite_reverse]" style={{ borderColor: 'var(--brand-to)', borderBottomColor: 'transparent' }} />
-                        </div>
-                        <div className="text-xs font-bold tracking-[0.3em] text-center uppercase" style={{ color: 'var(--brand-header-text)' }}>Loading Parlay&nbsp;Proz</div>
-                    </div>
-                </div>
-            )}
             <InstanceSidebar view={view} onChange={changeView} />
             <div className="flex-1 min-w-0 flex flex-col">
-                <header className="sticky top-0 z-40 bg-white border-b border-black/5 shadow-[0_2px_8px_-2px_rgba(0,0,0,0.06)]" style={{ color: 'var(--brand-header-text)' }}>
+                <header className={`sticky top-0 z-40 border-b shadow-[0_2px_8px_-2px_rgba(0,0,0,0.06)] transition-colors ${theme.mode === 'dark' ? 'bg-[#0F172A]/95 backdrop-blur border-slate-700/50' : 'bg-white border-black/5'}`} style={{ color: 'var(--brand-header-text)' }}>
                     <div className="max-w-7xl mx-auto px-6 py-4 flex items-center gap-4">
                         <div style={{ visibility: hydratedBrand ? 'visible' : 'hidden' }} suppressHydrationWarning>
                             {(() => {
-                                const map: Record<string, string> = { horizontal: brandLogoHorizontal, vertical: brandLogoVertical, icon: brandLogoIcon };
+                                const map: Record<string, string> = { horizontal: (theme.mode === 'dark' && brandLogoHorizontalDark) ? brandLogoHorizontalDark : brandLogoHorizontal, vertical: brandLogoVertical, icon: brandLogoIcon };
                                 const selected = brandLogoVariant === 'text' || brandLogoVariant === 'icon-text' ? '' : map[brandLogoVariant];
                                 const iconForCombo = brandLogoVariant === 'icon-text' ? map.icon : '';
                                 const showText = brandLogoVariant === 'icon-text' ? true : !selected;
-                                const base = (brandLogoVariant === 'icon' || brandLogoVariant === 'icon-text') ? 36 : 40; // base px
+                                const base = (brandLogoVariant === 'icon' || brandLogoVariant === 'icon-text') ? 36 : 40;
                                 const h = Math.round(base * brandLogoSize);
                                 return (
                                     <h1 className="flex items-center gap-3 text-xl md:text-2xl font-black tracking-tight select-none">
-                                        {/* eslint-disable-next-line @next/next/no-img-element */}
                                         {iconForCombo && <img src={iconForCombo} alt="Icon" style={{ height: h, width: h }} className="object-contain" />}
-                                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                                        {selected && !iconForCombo && <img src={selected} alt="Logo" style={{ height: h, width: brandLogoVariant === 'icon' ? h : 'auto', maxHeight: 160, maxWidth: 320 }} className={`object-contain ${brandLogoVariant === 'icon' ? '' : 'max-w-[260px]'}`} />}
+                                        {selected && !iconForCombo && <img src={selected} alt="Logo" style={{ height: h, width: brandLogoVariant === 'icon' ? h : 'auto', maxHeight: 160, maxWidth: 320 }} className={`object-contain ${brandLogoVariant === 'icon' ? '' : 'max-w-[260px]'} ${theme.mode === 'dark' ? 'drop-shadow-[0_0_6px_rgba(0,0,0,0.4)]' : ''}`} />}
                                         {showText && <span className="bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-transparent bg-clip-text leading-none drop-shadow-sm">{brandName || 'Brand'}</span>}
                                     </h1>
                                 );
@@ -384,10 +526,10 @@ export default function ParlayProzInstance() {
                                 <>
                                     <div className="relative w-56">
                                         <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 opacity-70" />
-                                        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search leads or customers" className="w-full h-10 pl-8 pr-3 rounded-xl bg-white/60 dark:bg-white/10 backdrop-blur ring-1 ring-white/60 text-[12px] font-medium placeholder:opacity-40 focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)]" />
+                                        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search leads or customers" className={`w-full h-10 pl-8 pr-3 rounded-xl backdrop-blur text-[12px] font-medium placeholder:opacity-40 focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)] ring-1 transition-colors ${theme.mode === 'dark' ? 'bg-slate-800/70 hover:bg-slate-800/80 ring-slate-600/60' : 'bg-white/60 hover:bg-white/80 ring-white/60'}`} />
                                     </div>
                                     <div className="relative">
-                                        <button onClick={() => setAnchorFilter(o => !o)} className={`h-10 px-3 rounded-xl flex items-center gap-2 text-[11px] font-semibold ring-1 ring-white/60 backdrop-blur ${anchorFilter ? 'bg-[var(--brand-from)]/20' : 'bg-white/60 hover:bg-white/80 dark:bg-white/10 dark:hover:bg-white/20'}`}><Filter size={14} />Filter</button>
+                                        <button onClick={() => setAnchorFilter(o => !o)} className={`h-10 px-3 rounded-xl flex items-center gap-2 text-[11px] font-semibold ring-1 backdrop-blur transition-colors ${anchorFilter ? 'bg-[var(--brand-from)]/25 ring-transparent text-white' : (theme.mode === 'dark' ? 'bg-slate-800/70 hover:bg-slate-800/80 ring-slate-600/60' : 'bg-white/60 hover:bg-white/80 ring-white/60')}`}><Filter size={14} />Filter</button>
                                         {anchorFilter && (
                                             <div className="absolute right-0 z-50 mt-2 w-72 rounded-2xl bg-white/90 backdrop-blur-xl ring-1 ring-black/5 shadow-xl p-4 flex flex-col gap-4 text-[12px] font-medium" style={{ color: '#1a1026' }}>
                                                 <div className="space-y-2">
@@ -425,103 +567,110 @@ export default function ParlayProzInstance() {
                                             </div>
                                         )}
                                     </div>
-                                    <div className="flex items-center gap-2 pl-2 ml-2 border-l border-white/40">
-                                        {/* Jump To Date Button */}
-                                        {showJumpTo && (
-                                            <div className="relative">
-                                                <button onClick={() => setShowJumpPicker(o => !o)} className="h-10 px-3 rounded-xl text-[11px] font-semibold bg-white/60 hover:bg-white ring-1 ring-white/60 flex items-center gap-2" style={{ color: '#1a1026' }}>
-                                                    Jump To
-                                                </button>
-                                                {showJumpPicker && (
-                                                    <div className="absolute right-0 mt-2 z-50 w-56 p-4 rounded-2xl bg-white/95 backdrop-blur-xl ring-1 ring-black/5 shadow-xl flex flex-col gap-3">
-                                                        <div className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#2e1b40' }}>Select Date</div>
-                                                        <input
-                                                            type="date"
-                                                            value={jumpDate}
-                                                            onChange={e => { setJumpDate(e.target.value); setShowJumpPicker(false); }}
-                                                            min={(() => { try { const all = document.querySelectorAll('[data-day]'); if (all.length) { return (all[0] as HTMLElement).getAttribute('data-day') || ''; } } catch { } return ''; })()}
-                                                            max={(() => { try { const all = document.querySelectorAll('[data-day]'); if (all.length) { return (all[all.length - 1] as HTMLElement).getAttribute('data-day') || ''; } } catch { } return ''; })()}
-                                                            className="h-10 w-full rounded-xl bg-white/70 ring-1 ring-white/60 px-3 text-[12px] font-medium focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)]"
-                                                        />
-                                                        <div className="flex justify-end gap-2">
-                                                            <button onClick={() => setShowJumpPicker(false)} className="px-3 h-9 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Close</button>
-                                                        </div>
-                                                    </div>
-                                                )}
+                                    <div className="relative">
+                                        <button onClick={() => { setSelectionMode(m => !m); if (selectionMode) clearSelection(); }} className={`h-10 px-3 rounded-xl text-[11px] font-semibold flex items-center gap-2 bg-white/60 hover:bg-white ring-1 ring-white/70 ${selectionMode ? '!bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white ring-0' : ''}`}>{selectionMode ? <CheckSquare size={14} /> : <Square size={14} />} {selectionMode ? `${selectedIds.size} Selected` : 'Select'}</button>
+                                        {selectionMode && selectedIds.size > 0 && (
+                                            <div className="absolute right-0 mt-2 w-80 rounded-2xl bg-white/90 backdrop-blur-xl ring-1 ring-black/5 shadow-xl p-4 z-50 text-[12px] font-medium flex flex-col gap-4" style={{ color: '#1a1026' }}>
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: '#1a1026' }}>Bulk Actions</span>
+                                                    <button onClick={clearSelection} className="text-[11px] font-semibold" style={{ color: '#2e1b40' }} >Clear</button>
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <BulkBtn label="Mark Interested" onClick={() => { bulkUpdate(Array.from(selectedIds), { firstCallStatus: 'Interested' }); }} />
+                                                    <BulkBtn label="Mark Answered" onClick={() => { bulkUpdate(Array.from(selectedIds), { firstCallStatus: 'Answered' }); }} />
+                                                    <BulkBtn label="Final Registered" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Registered' }); }} />
+                                                    <BulkBtn label="Final Not Reg" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Not Registered' }); }} />
+                                                    <BulkBtn label="Final Follow-up" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Follow-up Needed' }); }} />
+                                                    <BulkBtn label="Clear Final" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: '' }); }} />
+                                                </div>
+                                                <div className="flex items-center justify-end gap-2">
+                                                    <button onClick={() => setSelectionMode(false)} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Close</button>
+                                                </div>
                                             </div>
                                         )}
-                                        <button disabled={!canUndo} onClick={undo} className={`h-10 px-3 rounded-xl text-[11px] font-semibold ${canUndo ? 'bg-white/70 hover:bg-white ring-1 ring-white/70' : 'opacity-40 cursor-not-allowed bg-white/40'}`} style={canUndo ? { color: '#1a1026' } : undefined}>Undo</button>
-                                        <button disabled={!canRedo} onClick={redo} className={`h-10 px-3 rounded-xl text-[11px] font-semibold ${canRedo ? 'bg-white/70 hover:bg-white ring-1 ring-white/70' : 'opacity-40 cursor-not-allowed bg-white/40'}`} style={canRedo ? { color: '#1a1026' } : undefined}>Redo</button>
-                                        <div className="relative">
-                                            <button onClick={() => { setSelectionMode(m => !m); if (selectionMode) clearSelection(); }} className={`h-10 px-3 rounded-xl text-[11px] font-semibold flex items-center gap-2 bg-white/60 hover:bg-white ring-1 ring-white/70 ${selectionMode ? '!bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white ring-0' : ''}`}>{selectionMode ? <CheckSquare size={14} /> : <Square size={14} />} {selectionMode ? `${selectedIds.size} Selected` : 'Select'}</button>
-                                            {selectionMode && selectedIds.size > 0 && (
-                                                <div className="absolute right-0 mt-2 w-80 rounded-2xl bg-white/90 backdrop-blur-xl ring-1 ring-black/5 shadow-xl p-4 z-50 text-[12px] font-medium flex flex-col gap-4" style={{ color: '#1a1026' }}>
-                                                    <div className="flex items-center justify-between">
-                                                        <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: '#1a1026' }}>Bulk Actions</span>
-                                                        <button onClick={clearSelection} className="text-[11px] font-semibold" style={{ color: '#2e1b40' }} >Clear</button>
-                                                    </div>
-                                                    <div className="grid grid-cols-2 gap-3">
-                                                        <BulkBtn label="Mark Interested" onClick={() => { bulkUpdate(Array.from(selectedIds), { firstCallStatus: 'Interested' }); }} />
-                                                        <BulkBtn label="Mark Answered" onClick={() => { bulkUpdate(Array.from(selectedIds), { firstCallStatus: 'Answered' }); }} />
-                                                        <BulkBtn label="Final Registered" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Registered' }); }} />
-                                                        <BulkBtn label="Final Not Reg" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Not Registered' }); }} />
-                                                        <BulkBtn label="Final Follow-up" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: 'Follow-up Needed' }); }} />
-                                                        <BulkBtn label="Clear Final" onClick={() => { bulkUpdate(Array.from(selectedIds), { finalStatus: '' }); }} />
-                                                    </div>
-                                                    <div className="flex items-center justify-end gap-2">
-                                                        <button onClick={() => setSelectionMode(false)} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60">Close</button>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-                                        {/* Export Contacts (current filtered or selected) */}
-                                        <button
-                                            onClick={() => {
-                                                // Derive list: selected if selectionMode and some selected, else all filtered (sorted)
-                                                const base = (selectionMode && selectedIds.size > 0) ? sorted.filter(c => selectedIds.has(c.id)) : sorted;
-                                                const unique: Record<string, boolean> = {};
-                                                const lines: string[] = [];
-                                                base.forEach(c => {
-                                                    const phone = (c.phone || '').trim();
-                                                    if (!phone) return;
-                                                    const key = phone + '|' + (c.name || '');
-                                                    if (unique[key]) return; unique[key] = true;
-                                                    const safeName = (c.name || phone).replace(/\r|\n/g, ' ').trim();
-                                                    // Minimal vCard 3.0
-                                                    lines.push('BEGIN:VCARD');
-                                                    lines.push('VERSION:3.0');
-                                                    lines.push('FN:' + safeName);
-                                                    lines.push('N:' + safeName + ';;;;');
-                                                    lines.push('TEL;TYPE=CELL:' + phone.replace(/[^+0-9]/g, ''));
-                                                    if (c.firstCallStatus) lines.push('X-FIRST-CALL-STATUS:' + c.firstCallStatus);
-                                                    if (c.secondCallStatus) lines.push('X-SECOND-CALL-STATUS:' + c.secondCallStatus);
-                                                    if (c.finalStatus) lines.push('X-FINAL-STATUS:' + c.finalStatus);
-                                                    lines.push('END:VCARD');
-                                                });
-                                                if (!lines.length) {
-                                                    alert('No contacts with phone numbers to export.');
-                                                    return;
-                                                }
-                                                const blob = new Blob([lines.join('\n')], { type: 'text/vcard;charset=utf-8;' });
-                                                const url = URL.createObjectURL(blob);
-                                                const a = document.createElement('a');
-                                                a.href = url;
-                                                const ts = new Date().toISOString().slice(0, 10);
-                                                a.download = `contacts_${selectionMode && selectedIds.size ? 'selected' : 'filtered'}_${ts}.vcf`;
-                                                a.click();
-                                                setTimeout(() => URL.revokeObjectURL(url), 1500);
-                                            }}
-                                            disabled={sorted.length === 0}
-                                            className={`h-10 px-3 rounded-xl text-[11px] font-semibold bg-white/60 hover:bg-white ring-1 ring-white/70 disabled:opacity-40 disabled:cursor-not-allowed`}
-                                            style={{ color: '#1a1026' }}
-                                        >Export Contacts</button>
                                     </div>
+                                    <button onClick={() => setShowTools(s => !s)} className="h-10 px-3 rounded-xl text-[11px] font-semibold flex items-center gap-2 bg-white/60 hover:bg-white ring-1 ring-white/70" style={{ color: '#1a1026' }}>
+                                        <SlidersHorizontal size={14} /> Tools
+                                    </button>
                                 </>
                             )}
                             <ProfileMenu />
                         </div>
                     </div>
                 </header>
+                {/* Tools Sidebar Overlay with animated slide-in */}
+                {(showTools || toolsActive) && (
+                    <div className={`fixed inset-0 z-50 flex overflow-hidden transition-colors duration-300 ${showTools ? 'bg-black/20' : 'bg-black/0 pointer-events-none'}`} aria-label="Tools Sidebar" role="dialog" aria-modal="true">
+                        <div className="flex-1" onClick={() => setShowTools(false)} />
+                        <div className={`w-[300px] md:w-[340px] h-full flex flex-col gap-6 p-5 shadow-xl border-l border-black/10 dark:border-slate-600 bg-white dark:bg-slate-900/90 backdrop-blur-xl transform transition-transform duration-300 ease-out ${showTools ? 'translate-x-0' : 'translate-x-full'}`}>
+                            <div className="flex items-center justify-between">
+                                <h3 className="text-[11px] font-extrabold uppercase tracking-[0.18em] text-[#1a1026] dark:text-slate-100">Tools</h3>
+                                <button onClick={() => setShowTools(false)} className="p-2 rounded-lg bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)]" aria-label="Close tools sidebar"><X size={16} /></button>
+                            </div>
+                            <div className="space-y-3">
+                                <div className="text-[10px] font-semibold uppercase tracking-wide text-[#2e1b40] dark:text-slate-300">History</div>
+                                <div className="flex items-center gap-3">
+                                    <button ref={undoBtnRef} disabled={!canUndo} onClick={undo} className={`flex-1 h-10 px-3 rounded-xl text-[11px] font-semibold focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)] transition ${canUndo ? 'bg-[var(--brand-from)] text-white shadow hover:brightness-110' : 'opacity-40 cursor-not-allowed bg-black/5 dark:bg-slate-700/40 text-[#2e1b40] dark:text-slate-400'}`}>Undo</button>
+                                    <button disabled={!canRedo} onClick={redo} className={`flex-1 h-10 px-3 rounded-xl text-[11px] font-semibold focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)] transition ${canRedo ? 'bg-[var(--brand-from)] text-white shadow hover:brightness-110' : 'opacity-40 cursor-not-allowed bg-black/5 dark:bg-slate-700/40 text-[#2e1b40] dark:text-slate-400'}`}>Redo</button>
+                                </div>
+                            </div>
+                            {showJumpTo && (
+                                <div className="space-y-2">
+                                    <div className="text-[10px] font-semibold uppercase tracking-wide text-[#2e1b40] dark:text-slate-300">Jump To Date</div>
+                                    <input type="date" value={jumpDate} onChange={e => setJumpDate(e.target.value)}
+                                        min={(() => { try { const all = document.querySelectorAll('[data-day]'); if (all.length) { return (all[0] as HTMLElement).getAttribute('data-day') || ''; } } catch { } return ''; })()}
+                                        max={(() => { try { const all = document.querySelectorAll('[data-day]'); if (all.length) { return (all[all.length - 1] as HTMLElement).getAttribute('data-day') || ''; } } catch { } return ''; })()}
+                                        className="h-10 w-full rounded-xl bg-white/80 dark:bg-slate-800/70 ring-1 ring-black/10 dark:ring-slate-700 px-3 text-[12px] font-medium focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)] text-[#1a1026] dark:text-slate-100 placeholder:opacity-60" />
+                                </div>
+                            )}
+                            <div className="space-y-3">
+                                <div className="text-[10px] font-semibold uppercase tracking-wide text-[#2e1b40] dark:text-slate-300">Sorting</div>
+                                <div className="flex gap-2">
+                                    <select value={sortKey} onChange={e => setSortKey(e.target.value as typeof sortKey)} className="flex-1 h-10 px-2 rounded-xl bg-white/80 dark:bg-slate-800/70 ring-1 ring-black/10 dark:ring-slate-700 text-[11px] font-semibold focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)] text-[#1a1026] dark:text-slate-100">
+                                        <option value="dateAdded">Date Added</option>
+                                        <option value="progress">Progress</option>
+                                        <option value="name">Name</option>
+                                        <option value="leadNumber">Lead #</option>
+                                    </select>
+                                    <button onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')} className="h-10 px-3 rounded-xl text-[11px] font-semibold bg-white/90 dark:bg-slate-800/80 hover:bg-white dark:hover:bg-slate-700 ring-1 ring-black/10 dark:ring-slate-700 focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)] text-[#1a1026] dark:text-slate-100">{sortDir === 'asc' ? 'Asc' : 'Desc'}</button>
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                <div className="text-[10px] font-semibold uppercase tracking-wide text-[#2e1b40] dark:text-slate-300">Export</div>
+                                <button onClick={() => {
+                                    const base = (selectionMode && selectedIds.size > 0) ? sorted.filter(c => selectedIds.has(c.id)) : sorted;
+                                    const unique: Record<string, boolean> = {};
+                                    const lines: string[] = [];
+                                    base.forEach(c => {
+                                        const phone = (c.phone || '').trim();
+                                        if (!phone) return;
+                                        const key = phone + '|' + (c.name || '');
+                                        if (unique[key]) return; unique[key] = true;
+                                        const safeName = (c.name || phone).replace(/\r|\n/g, ' ').trim();
+                                        lines.push('BEGIN:VCARD');
+                                        lines.push('VERSION:3.0');
+                                        lines.push('FN:' + safeName);
+                                        lines.push('N:' + safeName + ';;;;');
+                                        lines.push('TEL;TYPE=CELL:' + phone.replace(/[^+0-9]/g, ''));
+                                        if (c.firstCallStatus) lines.push('X-FIRST-CALL-STATUS:' + c.firstCallStatus);
+                                        if (c.secondCallStatus) lines.push('X-SECOND-CALL-STATUS:' + c.secondCallStatus);
+                                        if (c.finalStatus) lines.push('X-FINAL-STATUS:' + c.finalStatus);
+                                        lines.push('END:VCARD');
+                                    });
+                                    if (!lines.length) { alert('No contacts with phone numbers to export.'); return; }
+                                    const blob = new Blob([lines.join('\n')], { type: 'text/vcard;charset=utf-8;' });
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = url; const ts = new Date().toISOString().slice(0, 10);
+                                    a.download = `contacts_${selectionMode && selectedIds.size ? 'selected' : 'filtered'}_${ts}.vcf`;
+                                    a.click();
+                                    setTimeout(() => URL.revokeObjectURL(url), 1500);
+                                }} disabled={sorted.length === 0} className="w-full h-10 px-3 rounded-xl text-[11px] font-semibold bg-[var(--brand-from)] text-white shadow hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)] disabled:opacity-40 disabled:cursor-not-allowed">Export Contacts</button>
+                            </div>
+                            <div className="mt-auto text-[10px] font-medium opacity-70 text-[#2e1b40] dark:text-slate-400">Press Esc or click backdrop to close. Settings persist.</div>
+                        </div>
+                    </div>
+                )}
                 <div className="max-w-[1700px] mx-auto px-5 md:px-8 lg:px-10 pt-6 pb-12 space-y-8 w-full">
                     {view === 'dashboard' && (
                         <DashboardPanel customers={customers} metrics={metrics} />
@@ -563,9 +712,10 @@ export default function ParlayProzInstance() {
                                     <AnalyticsOverview data={customers} remoteCount={remoteCount} localCount={customers.length} uniquePhoneCount={uniquePhoneCount} />
                                 </div>
                             );
-                            if (view === 'settings') return <SettingsPanel theme={theme} presets={presets} setPreset={setPreset} updateTheme={updateTheme} customStatusColors={customStatusColors} updateStatusColor={updateStatusColorRemoteAware} regenerateStatusColors={regenerateStatusPalette} exportTheme={exportTheme} importTheme={importTheme} forceSync={forceSync} customersForExport={customers}
+                            if (view === 'settings') return <SettingsPanel instanceId={instanceId} theme={theme} presets={presets} setPreset={setPreset} updateTheme={updateTheme} customStatusColors={customStatusColors} updateStatusColor={updateStatusColorRemoteAware} regenerateStatusColors={regenerateStatusPalette} exportTheme={exportTheme} importTheme={importTheme} forceSync={forceSync} customersForExport={customers} toggleMode={toggleMode}
                                 brandName={brandName} setBrandName={setBrandName}
                                 brandLogoHorizontal={brandLogoHorizontal} setBrandLogoHorizontal={setBrandLogoHorizontal}
+                                brandLogoHorizontalDark={brandLogoHorizontalDark} setBrandLogoHorizontalDark={setBrandLogoHorizontalDark}
                                 brandLogoVertical={brandLogoVertical} setBrandLogoVertical={setBrandLogoVertical}
                                 brandLogoIcon={brandLogoIcon} setBrandLogoIcon={setBrandLogoIcon}
                                 brandLogoVariant={brandLogoVariant} setBrandLogoVariant={setBrandLogoVariant}
@@ -575,6 +725,7 @@ export default function ParlayProzInstance() {
                                 domainLanding={domainLanding} setDomainLanding={setDomainLanding}
                                 domainFormEndpoint={domainFormEndpoint} setDomainFormEndpoint={setDomainFormEndpoint}
                                 domainApiBase={domainApiBase} setDomainApiBase={setDomainApiBase}
+                                markBrandDirty={markBrandDirty} forceSaveBrand={forceSaveBrand} brandSaveStatus={brandSaveStatus} brandSaveError={brandSaveError} isBrandDirty={localBrandDirtyRef.current}
                             />;
                             return null;
                         })()}
@@ -771,16 +922,10 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
         const secondCallsToday = customers.filter(c => c.secondCallDate === todayKey && c.secondCallStatus).length;
         const finalCallsToday = customers.filter(c => c.finalCallDate === todayKey && c.finalStatus).length;
         const totalCallTouchesToday = firstCallsToday + secondCallsToday + finalCallsToday;
-        // Leads needing a call today (very lightweight heuristic): no final outcome AND missing next dated step fully populated
+        // Leads needing first contact ONLY (requested): no first call date/status AND not in a terminal final status
         const toCallToday = customers.filter(c => {
-            if (c.finalStatus === 'Registered' || c.finalStatus === 'Not Registered') return false; // finished
-            // No first call yet
-            if (!isValid(c.firstCallDate)) return true;
-            // First call recorded but second not yet attempted
-            if (isValid(c.firstCallDate) && !isValid(c.secondCallDate) && !c.finalStatus) return true;
-            // Second call recorded but no final disposition yet
-            if (isValid(c.secondCallDate) && !isValid(c.finalCallDate) && !c.finalStatus) return true;
-            return false;
+            if (c.finalStatus === 'Registered' || c.finalStatus === 'Not Registered') return false;
+            return !isValid(c.firstCallDate) && !c.firstCallStatus;
         }).length;
         return {
             todayKey,
@@ -858,7 +1003,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
                         <DashStat label="Total Call Touches" value={dailyCallProgress.totalCallTouchesToday} />
                         <DashStat label="Registered" value={registered} compact />
                     </div>
-                    <p className="text-[10px] font-medium" style={{ color: 'var(--brand-text-secondary)' }}>Heuristic: &quot;To Call Today&quot; counts leads without a completed final status that are awaiting their next call step. Adjust logic later when explicit scheduling fields are added.</p>
+                    <p className="text-[10px] font-medium" style={{ color: 'var(--brand-text-secondary)' }}>&quot;To Call Today&quot; = leads with no recorded first call (date or status) and not in a final status.</p>
                 </div>
             )}
             {/* Defer charts until hydrated to avoid mismatches */}
@@ -870,7 +1015,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
                             <h3 className="text-[11px] font-extrabold uppercase tracking-[0.18em]" style={{ color: 'var(--brand-text-secondary)' }}>Registrations – Last 7 Days</h3>
                             <div className="flex items-end gap-2 h-44">
                                 {recent7.map(d => (
-                                    <div key={d.date} className="flex-1 flex flex-col items-center gap-2">
+                                    <div key={`recent7-${d.date}`} className="flex-1 flex flex-col items-center gap-2">
                                         <div className="w-full rounded-t-md" style={{ background: 'linear-gradient(to top,var(--brand-from),var(--brand-to))', height: `${(d.count / maxDay) * 100}%`, minHeight: d.count ? '10px' : '2px', opacity: d.count ? 1 : 0.35 }} />
                                         <div className="text-[9px] font-semibold" style={{ color: 'var(--brand-text-secondary)' }}>{d.date.slice(5)}</div>
                                         <div className="text-[10px] font-bold" style={{ color: 'var(--brand-text-primary)' }}>{d.count || ''}</div>
@@ -905,7 +1050,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
                                     const leadHeight = (d.leads / maxDailyLeads) * 100;
                                     const regHeight = (d.regs / maxDailyLeads) * 100;
                                     return (
-                                        <div key={d.date} id={`day-${d.date}`} data-day={d.date} className="flex-1 flex flex-col items-center gap-1">
+                                        <div key={`last30-${d.date}`} id={`day-${d.date}`} data-day={d.date} className="flex-1 flex flex-col items-center gap-1">
                                             <div className="w-full flex flex-col justify-end" style={{ height: '120px' }}>
                                                 <div style={{ height: leadHeight + '%', background: 'var(--brand-muted-bg)', border: '1px solid var(--brand-border)' }} className="rounded-t-[4px]" />
                                                 {d.regs > 0 && <div style={{ height: regHeight + '%', marginTop: '-4px', background: 'linear-gradient(to top,var(--brand-from),var(--brand-to))' }} className="rounded-t-md" />}
@@ -948,6 +1093,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
                             </div>
                         </div>
                     </div>
+                    {/* End charts section */}
                 </>
             )}
             {/* Cohort & Source Conversion */}
@@ -1012,7 +1158,7 @@ function DashboardPanel({ customers, metrics }: { customers: Customer[]; metrics
                     {activityTimeline.map(d => {
                         const total = d.newLeads + d.firstStatuses + d.finals;
                         return (
-                            <div key={d.date} className="min-w-[110px] rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--brand-card-bg)', border: '1px solid var(--brand-border)' }}>
+                            <div key={`activity-${d.date}`} className="min-w-[110px] rounded-xl p-3 flex flex-col gap-2" style={{ background: 'var(--brand-card-bg)', border: '1px solid var(--brand-border)' }}>
                                 <div className="text-[10px] font-semibold" style={{ color: 'var(--brand-text-secondary)' }}>{d.date.slice(5)}</div>
                                 <div className="flex flex-col gap-1 text-[10px] font-medium" style={{ color: 'var(--brand-text-primary)' }}>
                                     <span>New: <strong>{d.newLeads}</strong></span>
@@ -1235,8 +1381,9 @@ interface SettingsPanelProps {
     exportTheme: () => void;
     importTheme: (f: File) => void;
     forceSync: () => Promise<{ added: number; skipped: number }>;
+    toggleMode: () => void;
     brandName: string; setBrandName: (v: string) => void;
-    brandLogoHorizontal: string; setBrandLogoHorizontal: (v: string) => void;
+    brandLogoHorizontal: string; setBrandLogoHorizontal: (v: string) => void; brandLogoHorizontalDark: string; setBrandLogoHorizontalDark: (v: string) => void;
     brandLogoVertical: string; setBrandLogoVertical: (v: string) => void;
     brandLogoIcon: string; setBrandLogoIcon: (v: string) => void;
     brandLogoVariant: 'horizontal' | 'vertical' | 'icon' | 'icon-text' | 'text'; setBrandLogoVariant: (v: 'horizontal' | 'vertical' | 'icon' | 'icon-text' | 'text') => void;
@@ -1247,9 +1394,16 @@ interface SettingsPanelProps {
     domainFormEndpoint: string; setDomainFormEndpoint: (v: string) => void;
     domainApiBase: string; setDomainApiBase: (v: string) => void;
     customersForExport: Customer[];
+    instanceId: string;
+    // brand explicit save workflow props
+    markBrandDirty: () => void;
+    forceSaveBrand: () => void;
+    brandSaveStatus: 'idle' | 'saving' | 'saved' | 'error';
+    brandSaveError: string | null;
+    isBrandDirty: boolean;
 }
-function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusColors, updateStatusColor, regenerateStatusColors, exportTheme, importTheme, forceSync, brandName, setBrandName,
-    brandLogoHorizontal, setBrandLogoHorizontal,
+function SettingsPanel({ theme, presets: _presets, setPreset: _setPreset, updateTheme, customStatusColors: _customStatusColors, updateStatusColor: _updateStatusColor, regenerateStatusColors: _regenerateStatusColors, exportTheme, importTheme: _importTheme, forceSync, toggleMode: _toggleMode, brandName, setBrandName,
+    brandLogoHorizontal, setBrandLogoHorizontal, brandLogoHorizontalDark, setBrandLogoHorizontalDark,
     brandLogoVertical, setBrandLogoVertical,
     brandLogoIcon, setBrandLogoIcon,
     brandLogoVariant, setBrandLogoVariant,
@@ -1260,13 +1414,17 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
     domainFormEndpoint, setDomainFormEndpoint,
     domainApiBase, setDomainApiBase,
     // Added customers for export
-    customersForExport }: SettingsPanelProps) {
+    customersForExport, instanceId,
+    // brand explicit save workflow props
+    markBrandDirty, forceSaveBrand, brandSaveStatus, brandSaveError, isBrandDirty }: SettingsPanelProps) {
     // Convex mutations for importing leads
     const bulkUpsert = useMutation(api.customers.bulkUpsert);
     const dedupePhonesMutation = useMutation(api.customers.dedupePhones as unknown as typeof api.customers.dedupePhones);
+    const purgeUnknownMutation = useMutation(api.customers.purgeUnknown as unknown as typeof api.customers.purgeUnknown);
     const [importSource, setImportSource] = useState<string>('');
     const [importing, setImporting] = useState(false);
-    const [importResult, setImportResult] = useState<null | { rows: number; merged: number; removed: number; created: number; updated: number }>(null);
+    interface ImportResultSummary { rows: number; merged: number; removed: number; created: number; updated: number; skippedLocal?: number; skippedServer?: number; collapsedDuplicateLeadIds?: number; errors?: { leadId: string; error: string }[]; errorsTruncated?: boolean }
+    const [importResult, setImportResult] = useState<null | ImportResultSummary>(null);
     const [treatDuplicateLeadIdsAsUpdates, setTreatDuplicateLeadIdsAsUpdates] = useState(true);
     // Local force sync status (parent only supplies the function)
     const [forceSyncStatus, setForceSyncStatus] = useState<{ running: boolean; msg: string | null }>({ running: false, msg: null });
@@ -1276,15 +1434,69 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
         { key: 'brand', label: 'Brand Colors', description: 'Customize gradients and surfaces' },
         { key: 'import', label: 'Import CSV', description: 'Upload leads data' },
         { key: 'export', label: 'Export / Backup', description: 'Download theme & data (coming)' },
-        { key: 'appearance', label: 'Appearance', description: 'Layout density & visuals (coming)' },
+        { key: 'appearance', label: 'Appearance', description: 'Light vs Dark & density' },
         { key: 'notifications', label: 'Notifications', description: 'Email / in‑app alerts (coming)' },
         { key: 'goals', label: 'Goals & Affirmation', description: 'Manage goal presets (coming)' },
-        { key: 'advanced', label: 'Advanced', description: 'Raw JSON theme & developer tools (coming)' },
+        { key: 'advanced', label: 'Advanced', description: 'Maintenance & data hygiene tools' },
     ];
     const [active, setActive] = useState<string>('identity');
+    const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable');
     // Base accent pulls from theme, but override to deep violet for Brand section per request
     let accentColor = theme.secondaryText || '#5b21b6';
-    if (active === 'brand' || active === 'identity') accentColor = '#1a1026'; // near-black dark violet
+    // In dark mode use a deep slate (dark text on light/translucent panels) for better contrast
+    if (theme.mode === 'dark') {
+        // Light slate for high contrast on darker panels
+        accentColor = '#CBD5E1'; // slate-300
+    }
+    // Section-specific override (brighter heading text in dark mode)
+    if (active === 'brand' || active === 'identity') {
+        accentColor = theme.mode === 'dark' ? '#F1F5F9' : '#1a1026';
+    }
+
+    // Dynamic text color helper (for inside panels) chooses light or dark based on bg hex
+    const getReadable = (bg: string, light = '#F8FAFC', dark = '#0F172A') => {
+        const hex = /^#([0-9a-fA-F]{8}|[0-9a-fA-F]{6})$/.test(bg) ? bg.slice(0, 7) : '#1A2330';
+        const r = parseInt(hex.slice(1, 3), 16) / 255;
+        const g = parseInt(hex.slice(3, 5), 16) / 255;
+        const b = parseInt(hex.slice(5, 7), 16) / 255;
+        const toLin = (c: number) => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        const L = 0.2126 * toLin(r) + 0.7152 * toLin(g) + 0.0722 * toLin(b);
+        return L < 0.45 ? light : dark;
+    };
+    const panelBaseBg = theme.mode === 'dark' ? '#1A2330' : '#FFFFFF';
+    const panelTextColor = getReadable(panelBaseBg);
+    // Background radial defaults (local-only). Allow user to save current as default and restore.
+    const [radialDefaultCenter, setRadialDefaultCenter] = useState<string | null>(null);
+    const [radialDefaultEdge, setRadialDefaultEdge] = useState<string | null>(null);
+    useEffect(() => {
+        try {
+            const c = localStorage.getItem('pp_radial_default_center');
+            const e = localStorage.getItem('pp_radial_default_edge');
+            if (c) setRadialDefaultCenter(c);
+            if (e) setRadialDefaultEdge(e);
+        } catch { }
+    }, []);
+    const normalizeHexAlpha = (hex: string | undefined | null, fallback: string): string => {
+        if (!hex) return fallback;
+        if (/^#([0-9a-fA-F]{8})$/.test(hex)) return hex.toUpperCase();
+        if (/^#([0-9a-fA-F]{6})$/.test(hex)) return (hex + 'FF').toUpperCase();
+        return fallback;
+    };
+    const saveRadialDefaults = () => {
+        const center = normalizeHexAlpha(theme.backgroundRadialCenter, '#FFFFFF00');
+        const edge = normalizeHexAlpha(theme.backgroundRadialEdge, '#FFFFFF00').slice(0, 7) + '00'; // ensure edge has 00 alpha
+        try {
+            localStorage.setItem('pp_radial_default_center', center);
+            localStorage.setItem('pp_radial_default_edge', edge);
+        } catch { }
+        setRadialDefaultCenter(center);
+        setRadialDefaultEdge(edge);
+    };
+    const restoreRadialDefaults = () => {
+        if (!radialDefaultCenter && !radialDefaultEdge) return;
+        updateTheme({ backgroundRadialCenter: radialDefaultCenter || undefined, backgroundRadialEdge: radialDefaultEdge || undefined });
+    };
+    const hasRadialDefaults = !!(radialDefaultCenter || radialDefaultEdge);
     return (
         <div className="flex flex-col lg:flex-row gap-8 p-2">
             {/* Nav */}
@@ -1295,7 +1507,7 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                         const activeState = s.key === active;
                         return (
                             <button key={s.key} onClick={() => setActive(s.key)}
-                                className={`group relative px-4 py-3 rounded-2xl text-left flex-1 lg:flex-none transition shadow-sm ring-1 ${activeState ? 'bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white ring-transparent' : 'bg-white/70 hover:bg-white ring-white/60'}`}
+                                className={`group relative px-4 py-3 rounded-2xl text-left flex-1 lg:flex-none transition shadow-sm ring-1 ${activeState ? 'bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white ring-transparent' : (theme.mode === 'dark' ? 'bg-[#1A2330]/75 hover:bg-[#1A2330]/85 ring-[#263243]/70' : 'bg-white/70 hover:bg-white ring-white/60')}`}
                                 style={!activeState ? { color: accentColor } : undefined}
                             >
                                 <div className="text-[11px] font-bold tracking-wide uppercase" style={!activeState ? { color: accentColor } : undefined}>{s.label}</div>
@@ -1315,12 +1527,19 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                 <div className="space-y-5">
                                     <label className="flex flex-col gap-2 text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>
                                         Brand Name
-                                        <input value={brandName} onChange={e => setBrandName(e.target.value)} placeholder="Enter brand name" className="h-11 px-3 rounded-xl bg-white/70 ring-1 ring-white/60 text-[13px] font-medium focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)]" />
+                                        <input value={brandName} onChange={e => { setBrandName(e.target.value); markBrandDirty(); }} placeholder="Enter brand name" className="h-11 px-3 rounded-xl bg-white/70 ring-1 ring-white/60 text-[13px] font-medium focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)]" />
+                                        <div className="flex items-center gap-3 pt-2">
+                                            <button type="button" onClick={forceSaveBrand} disabled={brandSaveStatus === 'saving'} className={`px-4 h-9 rounded-xl text-[11px] font-semibold ring-1 ${(brandSaveStatus === 'saving') ? 'opacity-60 cursor-wait' : 'hover:bg-white'} bg-white/70 ring-white/60`}>Save Brand</button>
+                                            {brandSaveStatus === 'saved' && <span className="text-[10px] font-semibold text-green-600">Saved</span>}
+                                            {brandSaveStatus === 'error' && <span className="text-[10px] font-semibold text-red-600">{brandSaveError || 'Error'}</span>}
+                                            {isBrandDirty && brandSaveStatus === 'idle' && <span className="text-[10px] font-medium opacity-70">Unsaved changes</span>}
+                                        </div>
                                     </label>
                                     <div className="space-y-5">
                                         <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Logos (PNG / SVG)</div>
                                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-                                            <LogoUploader label="Horizontal" value={brandLogoHorizontal} onChange={setBrandLogoHorizontal} clearLabel="Clear" accentColor={accentColor} aspectHint="Wide header mark" />
+                                            <LogoUploader label="Horizontal (Light)" value={brandLogoHorizontal} onChange={setBrandLogoHorizontal} clearLabel="Clear" accentColor={accentColor} aspectHint="Wide header mark" />
+                                            <LogoUploader label="Horizontal (Dark)" value={brandLogoHorizontalDark} onChange={setBrandLogoHorizontalDark} clearLabel="Clear" accentColor={accentColor} aspectHint="Dark mode header mark" />
                                             <LogoUploader label="Vertical" value={brandLogoVertical} onChange={setBrandLogoVertical} clearLabel="Clear" accentColor={accentColor} aspectHint="Stacked / square mark" square size="large" />
                                             <LogoUploader label="Icon" value={brandLogoIcon} onChange={setBrandLogoIcon} clearLabel="Clear" accentColor={accentColor} aspectHint="Square icon" square size="large" />
                                         </div>
@@ -1333,7 +1552,7 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                                     const active = brandLogoVariant === opt;
                                                     return (
                                                         <button key={opt} type="button" onClick={() => setBrandLogoVariant(opt)}
-                                                            className={`px-3 h-9 rounded-xl text-[11px] font-semibold ring-1 transition ${active ? 'bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white ring-transparent shadow' : 'bg-white/70 hover:bg-white ring-white/60'}`}
+                                                            className={`px-3 h-9 rounded-xl text-[11px] font-semibold ring-1 transition ${active ? 'bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white ring-transparent shadow' : (theme.mode === 'dark' ? 'bg-[#1A2330]/75 hover:bg-[#1A2330]/85 ring-[#263243]/70' : 'bg-white/70 hover:bg-white ring-white/60')}`}
                                                             style={!active ? { color: accentColor } : undefined}
                                                         >{labelMap[opt]}</button>
                                                     );
@@ -1359,34 +1578,34 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                     <div className="space-y-3">
                                         <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Favicon (PNG)</div>
                                         <div className="flex items-center gap-4 flex-wrap">
-                                            <div className="w-14 h-14 rounded-xl bg-white/70 ring-1 ring-white/60 flex items-center justify-center overflow-hidden relative">
+                                            <div className={`w-14 h-14 rounded-xl flex items-center justify-center overflow-hidden relative ring-1 ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`}>
                                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                                 {brandFavicon ? <img src={brandFavicon} alt="Favicon" className="object-contain max-w-full max-h-full" /> : <span className="text-[9px] font-medium opacity-60">None</span>}
                                             </div>
                                             <div className="flex flex-col gap-2">
-                                                <label className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60 flex items-center gap-2 cursor-pointer">Upload
+                                                <label className={`px-4 h-10 rounded-xl text-[12px] font-semibold ring-1 flex items-center gap-2 cursor-pointer ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 hover:bg-[#1A2330]/85 ring-[#263243]/70' : 'bg-white/70 hover:bg-white ring-white/60'}`}>Upload
                                                     <input type="file" accept="image/png" className="hidden" onChange={e => { const file = e.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { setBrandFavicon(reader.result as string); }; reader.readAsDataURL(file); }} />
                                                 </label>
-                                                {brandFavicon && <button type="button" onClick={() => setBrandFavicon('')} className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/60 hover:bg-white ring-1 ring-white/60">Clear</button>}
+                                                {brandFavicon && <button type="button" onClick={() => setBrandFavicon('')} className={`px-4 h-10 rounded-xl text-[12px] font-semibold ring-1 ${theme.mode === 'dark' ? 'bg-[#1A2330]/65 hover:bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/60 hover:bg-white ring-white/60'}`}>Clear</button>}
                                             </div>
                                         </div>
                                     </div>
                                 </div>
                                 <div className="space-y-6">
-                                    <div className="p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 space-y-4">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Preview</div>
+                                    <div className={`p-5 rounded-2xl ring-1 space-y-4 ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`} style={{ color: getReadable(theme.mode === 'dark' ? '#1A2330' : '#FFFFFF') }}>
+                                        <div className="text-[11px] font-semibold uppercase tracking-wide">Preview</div>
                                         <div className="flex items-center gap-4">
                                             <div className="h-12 w-12 rounded-xl flex items-center justify-center overflow-hidden">
                                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                                 {brandLogoVariant === 'icon-text' && brandLogoIcon && <img src={brandLogoIcon} alt="Icon" className="object-contain max-w-full max-h-full" />}
                                                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                                                {brandLogoVariant !== 'text' && brandLogoVariant !== 'icon-text' && (() => { const map: Record<string, string> = { horizontal: brandLogoHorizontal, vertical: brandLogoVertical, icon: brandLogoIcon }; const src = map[brandLogoVariant]; if (src) return <img src={src} alt="Logo" className="object-contain max-w-full max-h-full" />; return <span className="text-[10px] font-bold opacity-70" style={{ color: accentColor }}>Logo</span>; })()}
+                                                {brandLogoVariant !== 'text' && brandLogoVariant !== 'icon-text' && (() => { const map: Record<string, string> = { horizontal: theme.mode === 'dark' && brandLogoHorizontalDark ? brandLogoHorizontalDark : brandLogoHorizontal, vertical: brandLogoVertical, icon: brandLogoIcon }; const src = map[brandLogoVariant]; if (src) return <img src={src} alt="Logo" className="object-contain max-w-full max-h-full" />; return <span className="text-[10px] font-bold opacity-70" style={{ color: accentColor }}>Logo</span>; })()}
                                                 {(brandLogoVariant === 'text' || (brandLogoVariant === 'icon-text' && !brandLogoIcon)) && <span className="text-[10px] font-bold opacity-70" style={{ color: accentColor }}>Logo</span>}
                                             </div>
                                             <div className="flex flex-col">
-                                                {(brandLogoVariant === 'text' || brandLogoVariant === 'icon-text') && <span className="text-lg font-black bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-transparent bg-clip-text leading-none">{brandName || 'Brand Name'}</span>}
-                                                {brandLogoVariant !== 'text' && brandLogoVariant !== 'icon-text' && <span className="text-lg font-black opacity-60" style={{ color: accentColor }}>{brandName || 'Brand Name'}</span>}
-                                                <span className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Dashboard Heading</span>
+                                                {(brandLogoVariant === 'text' || brandLogoVariant === 'icon-text') && <span className="text-lg font-black bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-transparent bg-clip-text leading-none drop-shadow-sm">{brandName || 'Brand Name'}</span>}
+                                                {brandLogoVariant !== 'text' && brandLogoVariant !== 'icon-text' && <span className="text-lg font-black opacity-80">{brandName || 'Brand Name'}</span>}
+                                                <span className="text-[10px] font-medium opacity-70">Dashboard Heading</span>
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-3">
@@ -1406,149 +1625,189 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                     </div>
                 )}
                 {active === 'brand' && (
+                    <BrandColorSettings theme={theme} presets={_presets} setPreset={_setPreset} updateTheme={updateTheme} />
+                )}
+                {active === 'advanced' && (
                     <div className="space-y-10">
                         <div>
-                            <h2 className="text-sm font-extrabold uppercase tracking-[0.18em] mb-4" style={{ color: accentColor }}>Brand Colors</h2>
-                            <p className="text-[11px] font-medium mb-6 max-w-2xl" style={{ color: accentColor, opacity: .8 }}>Customize your core gradient, surfaces, and text palette. Changes sync locally immediately and remotely shortly after preset selection. Status (badge) colors can be regenerated from the gradient or fine‑tuned below.</p>
-                            <div className="grid gap-8 lg:grid-cols-3">
-                                <div className="space-y-6">
-                                    <div>
-                                        <div className="text-[10px] font-semibold uppercase tracking-wide mb-3" style={{ color: accentColor }}>Gradient Stops</div>
-                                        <div className="grid grid-cols-3 gap-4">
-                                            {(['from', 'via', 'to'] as const).map(stop => {
-                                                const current = theme[stop];
-                                                return (
-                                                    <label key={stop} className="flex flex-col gap-1 text-[10px] font-semibold" style={{ color: accentColor }}>
-                                                        {stop.toUpperCase()}
-                                                        <input type="color" value={current} onChange={e => updateTheme({ [stop]: e.target.value })} className="h-12 w-full rounded-lg cursor-pointer bg-transparent border border-white/60" />
-                                                        <input value={current} onChange={e => updateTheme({ [stop]: e.target.value })} className="h-9 px-2 rounded-lg bg-white/70 ring-1 ring-white/60 text-[11px] font-medium" />
-                                                    </label>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <div className="text-[10px] font-semibold uppercase tracking-wide mb-3" style={{ color: accentColor }}>Surface & Text</div>
-                                        <div className="grid grid-cols-2 gap-4">
-                                            {([
-                                                ['background', 'Background'],
-                                                ['cardBg', 'Card BG'],
-                                                ['mutedBg', 'Muted BG'],
-                                                ['border', 'Border'],
-                                                ['primaryText', 'Primary Text'],
-                                                ['secondaryText', 'Secondary Text'],
-                                                ['sidebarText', 'Sidebar Text'],
-                                                ['headerText', 'Header Text']
-                                            ] as const).map(([key, label]) => {
-                                                const value = theme[key as keyof BrandTheme] as string;
-                                                return (
-                                                    <label key={key} className="flex flex-col gap-1 text-[10px] font-semibold" style={{ color: accentColor }}>
-                                                        {label}
-                                                        <div className="flex items-center gap-2">
-                                                            <input type="color" value={value} onChange={e => updateTheme({ [key]: e.target.value })} className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border border-white/60" />
-                                                            <input value={value} onChange={e => updateTheme({ [key]: e.target.value })} className="flex-1 h-9 px-2 rounded-lg bg-white/70 ring-1 ring-white/60 text-[11px] font-medium" />
-                                                        </div>
-                                                    </label>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                    <div className="space-y-3">
-                                        <div className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Presets</div>
-                                        <div className="flex flex-wrap gap-2">
-                                            {Object.keys(presets).map(k => {
-                                                const activePreset = theme.key === k;
-                                                return (
-                                                    <button key={k} type="button" onClick={() => setPreset(k)}
-                                                        className={`px-3 h-9 rounded-xl text-[11px] font-semibold ring-1 transition ${activePreset ? 'ring-transparent shadow bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white' : 'bg-white/70 hover:bg-white ring-white/60'}`}
-                                                        style={!activePreset ? { color: accentColor } : undefined}
-                                                    >{k}</button>
-                                                );
-                                            })}
-                                        </div>
-                                        <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Selecting a preset replaces current values; you can still tweak after applying.</div>
-                                    </div>
+                            <h2 className="text-sm font-extrabold uppercase tracking-[0.18em] mb-4" style={{ color: accentColor }}>Maintenance & Data Hygiene</h2>
+                            <div className="grid gap-6 md:grid-cols-2">
+                                <div className={`p-5 rounded-2xl ring-1 flex flex-col gap-4 ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`}>
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Purge Unknown / Empty Leads</div>
+                                    <p className="text-[11px] font-medium opacity-80" style={{ color: accentColor }}>
+                                        Deletes leads lacking name (blank/Unknown/Unnamed), phone digits (&lt;5), and email. Irreversible.
+                                    </p>
+                                    <button type="button" onClick={() => {
+                                        if (!confirm('Delete all empty/unknown leads? This cannot be undone. Continue?')) return;
+                                        purgeUnknownMutation({ instanceId }).then(r => {
+                                            alert(`Purge complete: removed ${r?.removed ?? 0} of ${r?.scanned ?? 0}. Refreshing...`);
+                                            setTimeout(() => location.reload(), 400);
+                                        }).catch(() => alert('Purge failed (see console).'));
+                                    }}
+                                        className={`px-4 h-11 rounded-xl text-[12px] font-semibold ring-1 shadow transition ${theme.mode === 'dark' ? 'bg-red-500/20 hover:bg-red-500/30 text-red-300 ring-red-500/40' : 'bg-red-600/10 hover:bg-red-600/20 text-red-700 ring-red-600/30'}`}
+                                    >Run Purge</button>
+                                    <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Export first if you need a backup.</div>
                                 </div>
-                                <div className="space-y-6 col-span-2">
-                                    <div className="p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 space-y-5">
-                                        <div className="flex items-center justify-between">
-                                            <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Status / Badge Colors</div>
-                                            <div className="flex items-center gap-2">
-                                                <button type="button" onClick={regenerateStatusColors} className="px-3 h-9 rounded-xl text-[11px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60" style={{ color: accentColor }}>Regenerate</button>
-                                            </div>
-                                        </div>
-                                        <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                                            {(['Interested', 'Answered', 'Voicemail', 'They Called', 'We Called', 'Registered', 'Follow-up Needed', 'Not Registered'] as const).map(s => {
-                                                const val = customStatusColors[s] || '#cccccc';
-                                                return (
-                                                    <label key={s} className="flex flex-col gap-1 text-[10px] font-semibold" style={{ color: accentColor }}>
-                                                        <span className="truncate" title={s}>{s}</span>
-                                                        <div className="flex items-center gap-2">
-                                                            <input type="color" value={val} onChange={e => updateStatusColor(s, e.target.value)} className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border border-white/60" />
-                                                            <input value={val} onChange={e => updateStatusColor(s, e.target.value)} className="flex-1 h-9 px-2 rounded-lg bg-white/70 ring-1 ring-white/60 text-[11px] font-medium" />
-                                                        </div>
-                                                    </label>
-                                                );
-                                            })}
-                                        </div>
-                                        <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Regenerate uses your gradient to derive a palette. Fine‑tune any individual color afterward.</div>
+                                <div className={`p-5 rounded-2xl ring-1 flex flex-col gap-4 ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`}>
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Re-run Phone Deduplication</div>
+                                    <p className="text-[11px] font-medium opacity-80" style={{ color: accentColor }}>Merges duplicate phone records (keeps most complete) and removes extras.</p>
+                                    <button type="button" onClick={() => {
+                                        dedupePhonesMutation({ instanceId }).then(r => {
+                                            alert(`Dedupe: merged ${r?.merged ?? 0}, removed ${r?.removed ?? 0}. Refreshing...`);
+                                            setTimeout(() => location.reload(), 400);
+                                        }).catch(() => alert('Dedupe failed (see console).'));
+                                    }}
+                                        className={`px-4 h-11 rounded-xl text-[12px] font-semibold ring-1 shadow transition ${theme.mode === 'dark' ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 ring-amber-500/40' : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 ring-amber-500/30'}`}
+                                    >Run Dedupe</button>
+                                    <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Canonical record preserved.</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <h2 className="text-sm font-extrabold uppercase tracking-[0.18em] mb-4" style={{ color: accentColor }}>CSV Seeding Status</h2>
+                            <div className={`p-5 rounded-2xl ring-1 space-y-3 ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`} style={{ color: accentColor }}>
+                                <p className="text-[11px] font-medium opacity-80">Initial CSV bootstrap finished. Automatic reseeding disabled so unknown placeholders won&apos;t return. New rows only via manual import or API.</p>
+                                <p className="text-[10px] font-medium opacity-70">If empties reappear: an old client build may still seed, or import file had blank lines. Use Purge then refresh.</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                {/* Brand Colors section intentionally merged elsewhere; removed duplicate broken blocks */}
+                {active === 'appearance' && (
+                    <div className="space-y-10">
+                        <div>
+                            <h2 className="text-sm font-extrabold uppercase tracking-[0.18em] mb-4" style={{ color: accentColor }}>Appearance</h2>
+                            <p className="text-[11px] font-medium mb-6 max-w-2xl" style={{ color: accentColor, opacity: .8 }}>Toggle overall light or dark mode. Dark mode adjusts surfaces & text while keeping your gradient colors. You can still fine‑tune individual colors in Brand Colors.</p>
+                            <div className="flex flex-wrap items-center gap-6">
+                                <div className="p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 flex flex-col gap-4">
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Color Mode</div>
+                                    <div className="flex items-center gap-3">
+                                        <button type="button" onClick={() => {
+                                            if (theme.mode === 'light') return;
+                                            // Light palette refresh (keeps gradient stops)
+                                            updateTheme({
+                                                mode: 'light',
+                                                background: '#F9FAFB',
+                                                cardBg: '#FFFFFF',
+                                                mutedBg: '#F3F4F6',
+                                                border: '#E5E7EB',
+                                                primaryText: '#111827',
+                                                secondaryText: '#6B7280',
+                                                sidebarText: '#374151',
+                                                headerText: '#111827',
+                                                backgroundRadialCenter: theme.backgroundRadialCenter || '#ffffffFF',
+                                                backgroundRadialEdge: '#ffffff00'
+                                            });
+                                        }}
+                                            className={`px-4 h-10 rounded-xl text-[12px] font-semibold ring-1 transition ${theme.mode !== 'dark' ? 'bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white ring-transparent shadow' : 'bg-[#1E293B]/80 hover:bg-[#1E293B]/90 ring-[#334155]/60'}`}>Light</button>
+                                        <button type="button" onClick={() => {
+                                            if (theme.mode === 'dark') return;
+                                            // Rich dark palette (slightly elevated surfaces, subtle radial glow)
+                                            updateTheme({
+                                                mode: 'dark',
+                                                background: '#0E1116',
+                                                cardBg: '#1A2330',
+                                                mutedBg: '#141B25',
+                                                border: '#263243',
+                                                primaryText: '#F1F5F9',
+                                                secondaryText: '#94A3B8',
+                                                sidebarText: '#E2E8F0',
+                                                headerText: '#F8FAFC',
+                                                backgroundRadialCenter: '#1E293BFF', // deep slate/blue center glow
+                                                backgroundRadialEdge: '#0E111600'    // fully transparent edge (100% transparency)
+                                            });
+                                        }}
+                                            className={`px-4 h-10 rounded-xl text-[12px] font-semibold ring-1 transition ${(theme.mode as string) === 'dark' ? 'bg-gradient-to-r from-[var(--brand-from)] via-[var(--brand-via)] to-[var(--brand-to)] text-white ring-transparent shadow' : 'bg-white/80 hover:bg-white ring-white/60'}`}>Dark</button>
                                     </div>
-                                    <div className="p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 space-y-4">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Theme Export / Import</div>
-                                        <div className="flex flex-wrap gap-3 items-center">
-                                            <button type="button" onClick={exportTheme} className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60">Export JSON</button>
-                                            <label className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60 flex items-center gap-2 cursor-pointer">Import
-                                                <input type="file" accept="application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importTheme(f); }} />
-                                            </label>
-                                            <button type="button" onClick={regenerateStatusColors} className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/60 hover:bg-white ring-1 ring-white/60">Rebuild Status Palette</button>
-                                        </div>
-                                        <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Export creates a downloadable JSON containing theme + status colors. Import will overwrite current values.</div>
-                                    </div>
-                                    <div className="p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 space-y-4">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Live Preview</div>
-                                        <div className="rounded-xl p-6 border" style={{ background: 'linear-gradient(90deg,' + theme.from + ',' + theme.via + ',' + theme.to + ')', borderColor: theme.border }}>
+                                    <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Switching modes swaps surface & text palette to optimized values. Gradient stops stay the same, so your brand identity remains intact.</div>
+                                </div>
+                                <div className={`p-5 rounded-2xl ring-1 flex flex-col gap-4 ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`}>
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Background Layers</div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <label className="flex flex-col gap-1 text-[10px] font-semibold" style={{ color: accentColor }}>
+                                            Radial Center
                                             {(() => {
-                                                const hexes = [theme.from, theme.via, theme.to].filter(h => /^#([0-9a-fA-F]{6})$/.test(h));
-                                                const luminance = (h: string) => {
-                                                    const r = parseInt(h.slice(1, 3), 16) / 255;
-                                                    const g = parseInt(h.slice(3, 5), 16) / 255;
-                                                    const b = parseInt(h.slice(5, 7), 16) / 255;
-                                                    const toLin = (c: number) => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-                                                    const R = toLin(r), G = toLin(g), B = toLin(b);
-                                                    return 0.2126 * R + 0.7152 * G + 0.0722 * B;
+                                                const raw = theme.backgroundRadialCenter || '#ffffff';
+                                                const norm = /^#([0-9a-fA-F]{8})$/.test(raw) ? raw : (/^#([0-9a-fA-F]{6})$/.test(raw) ? raw + 'FF' : '#ffffffFF');
+                                                const base = norm.slice(0, 7); // #RRGGBB
+                                                const alphaHex = norm.slice(7, 9);
+                                                const alphaPct = Math.round(parseInt(alphaHex, 16) / 255 * 100);
+                                                const setBase = (hex: string) => {
+                                                    const next = hex + alphaHex;
+                                                    updateTheme({ backgroundRadialCenter: next });
                                                 };
-                                                const avgLum = hexes.length ? hexes.reduce((a, h) => a + luminance(h), 0) / hexes.length : 0.5;
-                                                const contrastColor = avgLum < 0.5 ? '#FFFFFF' : '#1a1026';
-                                                const shadow = avgLum < 0.5 ? '0 1px 2px rgba(0,0,0,0.5)' : undefined;
+                                                const setAlpha = (pct: number) => {
+                                                    const clamped = Math.max(0, Math.min(100, pct));
+                                                    const a = Math.round(clamped / 100 * 255).toString(16).padStart(2, '0').toUpperCase();
+                                                    updateTheme({ backgroundRadialCenter: base + a });
+                                                };
                                                 return (
-                                                    <>
-                                                        <div className="font-black text-lg mb-1" style={{ color: contrastColor, textShadow: shadow }}>Brand Gradient</div>
-                                                        <div className="text-[11px] font-medium max-w-sm" style={{ color: contrastColor, textShadow: shadow, opacity: .9 }}>This gradient powers emphasis elements across the dashboard (buttons, highlights, headers).</div>
-                                                    </>
-                                                );
-                                            })()}
-                                        </div>
-                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                            {([
-                                                ['background', 'App BG'],
-                                                ['cardBg', 'Card BG'],
-                                                ['mutedBg', 'Muted BG'],
-                                                ['border', 'Border'],
-                                                ['primaryText', 'Primary'],
-                                                ['secondaryText', 'Secondary'],
-                                                ['sidebarText', 'Sidebar'],
-                                                ['headerText', 'Header']
-                                            ] as const).map(([key, label]) => {
-                                                const value = theme[key as keyof BrandTheme] as string;
-                                                return (
-                                                    <div key={key} className="rounded-xl p-3 text-[10px] font-semibold ring-1 ring-white/60" style={{ background: value, color: key.includes('Text') ? value : accentColor }}>
-                                                        <div className="opacity-70 mb-1" style={{ color: accentColor }}>{label}</div>
-                                                        <div className="text-[9px] font-medium break-all" style={{ color: accentColor }}>{value}</div>
+                                                    <div className="space-y-2">
+                                                        <div className="flex items-center gap-2">
+                                                            <input type="color" value={base} onChange={e => setBase(e.target.value)} className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border border-white/60" />
+                                                            <input value={base} onChange={e => setBase(e.target.value)} className={`flex-1 h-9 px-2 rounded-lg ring-1 text-[11px] font-medium ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`} />
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <input type="range" min={0} max={100} value={alphaPct} onChange={e => setAlpha(parseInt(e.target.value))} className="flex-1 accent-[var(--brand-from)]" />
+                                                            <span className="w-10 text-right tabular-nums">{alphaPct}%</span>
+                                                        </div>
+                                                        <div className="text-[9px] font-medium opacity-70">Hex w/ Alpha: {base + alphaHex}</div>
                                                     </div>
                                                 );
-                                            })}
-                                        </div>
+                                            })()}
+                                        </label>
+                                        <label className="flex flex-col gap-1 text-[10px] font-semibold" style={{ color: accentColor }}>
+                                            Radial Edge
+                                            {(() => {
+                                                const raw = theme.backgroundRadialEdge || '#ffffff00';
+                                                const norm = /^#([0-9a-fA-F]{8})$/.test(raw) ? raw : (/^#([0-9a-fA-F]{6})$/.test(raw) ? raw + '00' : '#ffffff00');
+                                                const base = norm.slice(0, 7);
+                                                const alphaHex = norm.slice(7, 9);
+                                                const alphaPct = Math.round(parseInt(alphaHex, 16) / 255 * 100);
+                                                const setBase = (hex: string) => {
+                                                    const next = hex + alphaHex;
+                                                    updateTheme({ backgroundRadialEdge: next });
+                                                };
+                                                const setAlpha = (pct: number) => {
+                                                    const clamped = Math.max(0, Math.min(100, pct));
+                                                    const a = Math.round(clamped / 100 * 255).toString(16).padStart(2, '0').toUpperCase();
+                                                    updateTheme({ backgroundRadialEdge: base + a });
+                                                };
+                                                return (
+                                                    <div className="space-y-2">
+                                                        <div className="flex items-center gap-2">
+                                                            <input type="color" value={base} onChange={e => setBase(e.target.value)} className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border border-white/60" />
+                                                            <input value={base} onChange={e => setBase(e.target.value)} className={`flex-1 h-9 px-2 rounded-lg ring-1 text-[11px] font-medium ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`} />
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <input type="range" min={0} max={100} value={alphaPct} onChange={e => setAlpha(parseInt(e.target.value))} className="flex-1 accent-[var(--brand-from)]" />
+                                                            <span className="w-10 text-right tabular-nums">{alphaPct}%</span>
+                                                        </div>
+                                                        <div className="text-[9px] font-medium opacity-70">Hex w/ Alpha: {base + alphaHex}</div>
+                                                    </div>
+                                                );
+                                            })()}
+                                        </label>
                                     </div>
+                                    <div className="flex flex-wrap gap-3 pt-2">
+                                        <button type="button" onClick={saveRadialDefaults}
+                                            className={`px-3 h-9 rounded-xl text-[11px] font-semibold ring-1 ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 hover:bg-[#1A2330]/85 ring-[#263243]/70' : 'bg-white/70 hover:bg-white ring-white/60'}`}
+                                            style={{ color: accentColor }}
+                                        >Save as Default</button>
+                                        {hasRadialDefaults && (
+                                            <button type="button" onClick={restoreRadialDefaults}
+                                                className={`px-3 h-9 rounded-xl text-[11px] font-semibold ring-1 ${theme.mode === 'dark' ? 'bg-[#1A2330]/65 hover:bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/60 hover:bg-white ring-white/60'}`}
+                                                style={{ color: accentColor }}
+                                            >Reset to Default</button>
+                                        )}
+                                        {hasRadialDefaults && radialDefaultCenter && (
+                                            <span className="text-[10px] font-medium opacity-70 flex items-center gap-2" style={{ color: accentColor }}>
+                                                <span className="inline-flex items-center gap-1">Default Center:<span className="font-semibold">{radialDefaultCenter}</span></span>
+                                                {radialDefaultEdge && <span className="inline-flex items-center gap-1">Edge:<span className="font-semibold">{radialDefaultEdge}</span></span>}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="text-[10px] font-medium opacity-70" style={{ color: accentColor }}>Customize the center and edge colors of the subtle radial glow behind your interface (light mode only currently).</div>
                                 </div>
                             </div>
                         </div>
@@ -1577,7 +1836,7 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                     <input value={domainApiBase} onChange={e => setDomainApiBase(e.target.value.trim())} placeholder="e.g. https://api.example.com/v1" className="h-11 px-3 rounded-xl bg-white/70 ring-1 ring-white/60 text-[13px] font-medium focus:outline-none focus:ring-2 focus:ring-[var(--brand-from)]" />
                                 </label>
                             </div>
-                            <div className="mt-8 p-5 rounded-2xl bg-white/70 ring-1 ring-white/60 space-y-4">
+                            <div className={`mt-8 p-5 rounded-2xl ring-1 space-y-4 ${theme.mode === 'dark' ? 'bg-[#1A2330]/75 ring-[#263243]/70' : 'bg-white/70 ring-white/60'}`}>
                                 <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>Preview / Usage</div>
                                 <ul className="text-[11px] font-medium leading-relaxed" style={{ color: accentColor }}>
                                     <li><strong>Primary:</strong> {domainPrimary || <em className="opacity-60">not set</em>}</li>
@@ -1648,7 +1907,7 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                 <span className="text-[10px] font-semibold opacity-80">{forceSyncStatus.msg}</span>
                             )}
                         </div>
-                        <label className={`relative flex flex-col items-center justify-center gap-3 h-52 border-2 border-dashed rounded-2xl cursor-pointer transition ${importing ? 'opacity-60 pointer-events-none' : 'hover:bg-white'} bg-white/60 ring-1 ring-white/60`}>
+                        <label className={`relative flex flex-col items-center justify-center gap-3 h-52 border-2 border-dashed rounded-2xl cursor-pointer transition ${importing ? 'opacity-60 pointer-events-none' : (theme.mode === 'dark' ? 'hover:bg-[#1A2330]/70' : 'hover:bg-white')} ${theme.mode === 'dark' ? 'bg-[#1A2330]/55 border-[#263243]/70 ring-1 ring-[#263243]/70' : 'bg-white/60 ring-1 ring-white/60'}`}>
                             <input type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => {
                                 const file = e.target.files?.[0]; if (!file) return; setImportResult(null); setImporting(true);
                                 Papa.parse(file, {
@@ -1659,18 +1918,37 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                             const existingIds = new Set<string>(customersForExport.map(c => c.id));
                                             let created = 0; let updated = 0;
                                             const toCustomers = rows.map((row, idx) => {
-                                                const asStr = (v: unknown) => (v ?? '').toString();
-                                                const contactRaw = asStr(row['Contact Info']);
-                                                let phone = contactRaw; let email: string | undefined;
-                                                if (contactRaw.includes('|')) {
-                                                    const parts = contactRaw.split('|').map((p: string) => p.trim());
-                                                    parts.forEach((p: string) => { if (!email && /@/.test(p)) email = p; });
-                                                    const phoneCandidate = parts.find((p: string) => /\d/.test(p) && !/@/.test(p));
-                                                    phone = phoneCandidate ? phoneCandidate.replace(/\s+/g, ' ') : '';
-                                                } else if (/@/.test(contactRaw)) { email = contactRaw.trim(); phone = ''; }
-                                                const sourceFile = asStr(row['Source (Facebook/Instagram/WhatsApp/TikTok)']);
-                                                const sourceFinal = (importSource || sourceFile) as string;
-                                                let rawLeadId = asStr(row['Lead ID']);
+                                                const asStr = (v: unknown) => (v ?? '').toString().trim();
+                                                // Helper to fetch first non-empty of multiple possible headers
+                                                const pick = (alts: string[]) => {
+                                                    for (const k of alts) {
+                                                        if (row.hasOwnProperty(k) && asStr(row[k]).length) return asStr(row[k]);
+                                                    }
+                                                    return '';
+                                                };
+                                                // Phone / Email extraction: support either combined Contact Info or separate Phone/Email columns
+                                                let phone = '';
+                                                let email: string | undefined;
+                                                const contactRaw = pick(['Contact Info']);
+                                                if (contactRaw) {
+                                                    if (contactRaw.includes('|')) {
+                                                        const parts = contactRaw.split('|').map(p => p.trim());
+                                                        parts.forEach(p => { if (!email && /@/.test(p)) email = p; });
+                                                        const phoneCandidate = parts.find(p => /\d/.test(p) && !/@/.test(p));
+                                                        phone = phoneCandidate ? phoneCandidate.replace(/\s+/g, ' ') : '';
+                                                    } else if (/@/.test(contactRaw)) {
+                                                        email = contactRaw;
+                                                    } else {
+                                                        phone = contactRaw;
+                                                    }
+                                                } else {
+                                                    phone = pick(['Phone']);
+                                                    const emailRaw = pick(['Email']);
+                                                    if (emailRaw) email = emailRaw;
+                                                }
+                                                const sourceRaw = pick(['Source', 'Source (Facebook/Instagram/WhatsApp/TikTok)']);
+                                                const sourceFinal = (importSource || sourceRaw) as string;
+                                                let rawLeadId = pick(['Lead ID', 'leadId', 'ID']);
                                                 if (!rawLeadId) rawLeadId = `imp_${Date.now()}_${idx}`;
                                                 let leadId = rawLeadId.trim();
                                                 let duplicate = existingIds.has(leadId);
@@ -1678,7 +1956,6 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                                     if (treatDuplicateLeadIdsAsUpdates) {
                                                         updated++;
                                                     } else {
-                                                        // generate new unique id
                                                         leadId = `imp_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 7)}`;
                                                         duplicate = false;
                                                         created++;
@@ -1687,29 +1964,75 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                                                     created++;
                                                 }
                                                 existingIds.add(leadId);
+                                                const firstCallStatus = pick(['First Call Status', 'First Call Status (Voicemail/Answered/Interested/Not Interested)']);
+                                                const secondCallStatus = pick(['Second Call Status', 'Second Call Status (They Called/We Called/Voicemail/Answered)']);
+                                                const finalStatus = pick(['Final Status', 'Final Status (Registered/Not Registered/Follow-up Needed)']);
                                                 return {
                                                     leadId,
-                                                    name: asStr(row['Customer Name']),
+                                                    name: pick(['Customer Name', 'Name']),
                                                     phone,
                                                     email,
                                                     country: undefined,
                                                     source: sourceFinal,
-                                                    dateAdded: asStr(row['Date Entered']),
-                                                    firstCallDate: asStr(row['Date First Called']),
-                                                    firstCallStatus: asStr(row['First Call Status (Voicemail/Answered/Interested/Not Interested)']),
-                                                    notes: asStr(row['Notes from First Call']),
-                                                    secondCallDate: asStr(row['Date Second Call']),
-                                                    secondCallStatus: asStr(row['Second Call Status (They Called/We Called/Voicemail/Answered)']),
-                                                    secondCallNotes: asStr(row['Second Call Notes']),
-                                                    finalCallDate: asStr(row['Date Registered']),
-                                                    finalStatus: asStr(row['Final Status (Registered/Not Registered/Follow-up Needed)']),
-                                                    finalNotes: asStr(row['Final Notes']),
-                                                    pronouns: undefined, device: undefined, leadScore: undefined, lastUpdated: new Date().toISOString(), lastMessageSnippet: undefined, messageCount: undefined,
+                                                    dateAdded: pick(['Date Entered', 'Date Added', 'Created', 'dateAdded']),
+                                                    firstCallDate: pick(['Date First Called', 'First Call Date', 'firstCallDate']),
+                                                    firstCallStatus,
+                                                    notes: pick(['Notes from First Call', 'First Call Notes', 'notes']),
+                                                    secondCallDate: pick(['Date Second Call', 'Second Call Date', 'secondCallDate']),
+                                                    secondCallStatus,
+                                                    secondCallNotes: pick(['Second Call Notes', 'secondCallNotes']),
+                                                    finalCallDate: pick(['Date Registered', 'Final Call Date', 'finalCallDate']),
+                                                    finalStatus,
+                                                    finalNotes: pick(['Final Notes', 'finalNotes']),
+                                                    pronouns: undefined,
+                                                    device: undefined,
+                                                    leadScore: undefined,
+                                                    lastUpdated: new Date().toISOString(),
+                                                    lastMessageSnippet: undefined,
+                                                    messageCount: undefined,
                                                 };
                                             });
-                                            await bulkUpsert({ customers: toCustomers });
-                                            const dedupeResult = await dedupePhonesMutation({});
-                                            setImportResult({ rows: toCustomers.length, merged: dedupeResult.merged || 0, removed: dedupeResult.removed || 0, created, updated });
+                                            // Client-side prune of empty/unknown leads to avoid sending them to server (server also skips defensively)
+                                            const filteredCustomers = toCustomers.filter(c => {
+                                                const normName = (c.name || '').trim().toLowerCase();
+                                                const hasName = !!(normName && normName !== 'unknown' && normName !== 'unnamed');
+                                                const digits = (c.phone || '').replace(/\D+/g, '');
+                                                const hasPhone = digits.length >= 5;
+                                                const hasEmail = !!(c.email && c.email.trim().length > 0);
+                                                return hasName || hasPhone || hasEmail;
+                                            });
+                                            const prePruneSkipped = toCustomers.length - filteredCustomers.length;
+                                            // Chunked upload to avoid large single mutation payloads
+                                            const CHUNK_SIZE = 300;
+                                            let totalSkippedServer = 0;
+                                            let totalCollapsed = 0;
+                                            const allErrors: { leadId: string; error: string }[] = [];
+                                            for (let i = 0; i < filteredCustomers.length; i += CHUNK_SIZE) {
+                                                const slice = filteredCustomers.slice(i, i + CHUNK_SIZE);
+                                                try {
+                                                    const res = await bulkUpsert({ instanceId, customers: slice });
+                                                    totalSkippedServer += res?.skipped || 0;
+                                                    totalCollapsed += res?.collapsedDuplicateLeadIds || 0;
+                                                    if (res?.errors) allErrors.push(...res.errors);
+                                                } catch (e) {
+                                                    console.error('[Import bulkUpsert chunk failed]', e, { idxStart: i, example: slice[0] });
+                                                    allErrors.push({ leadId: slice[0]?.leadId || `chunk_${i}`, error: String(e) });
+                                                }
+                                            }
+                                            const dedupeResult = await dedupePhonesMutation({ instanceId });
+                                            const summary: ImportResultSummary = {
+                                                rows: filteredCustomers.length,
+                                                merged: dedupeResult.merged || 0,
+                                                removed: dedupeResult.removed || 0,
+                                                created,
+                                                updated,
+                                                skippedLocal: prePruneSkipped,
+                                                skippedServer: totalSkippedServer,
+                                                collapsedDuplicateLeadIds: totalCollapsed,
+                                                errors: allErrors.slice(0, 25),
+                                                errorsTruncated: allErrors.length > 25,
+                                            };
+                                            setImportResult(summary);
                                             // Helpful console diagnostics (development only)
                                             if (process.env.NODE_ENV !== 'production') {
                                                 console.groupCollapsed('[Import Diagnostics]');
@@ -1732,7 +2055,19 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                             {importResult && (
                                 <div className="absolute bottom-3 left-3 right-3 text-[10px] font-semibold bg-white/80 rounded-lg px-2 py-1 text-gray-700 space-y-0.5">
                                     <div>Imported {importResult.rows} rows • New {importResult.created} • Updated {importResult.updated}</div>
+                                    {(((importResult.skippedLocal || 0) > 0) || ((importResult.skippedServer || 0) > 0)) && (
+                                        <div className="text-[9px] font-medium opacity-70">Skipped {importResult.skippedLocal || 0} local • {importResult.skippedServer || 0} server</div>
+                                    )}
                                     {(importResult.merged > 0 || importResult.removed > 0) && <div className="text-[9px] font-medium opacity-70">Post-import merge: {importResult.merged} merged • {importResult.removed} removed</div>}
+                                    {importResult.collapsedDuplicateLeadIds! > 0 && (
+                                        <div className="text-[9px] font-medium opacity-70">Collapsed {importResult.collapsedDuplicateLeadIds} duplicate leadId record(s)</div>
+                                    )}
+                                    {importResult.errors && importResult.errors.length > 0 && (
+                                        <div className="text-[9px] font-medium opacity-70 max-h-20 overflow-auto space-y-0.5">
+                                            <div>Errors ({importResult.errors.length}{importResult.errorsTruncated ? '+' : ''}):</div>
+                                            {importResult.errors.map(e => <div key={e.leadId}>{e.leadId}: {e.error.slice(0, 120)}</div>)}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </label>
@@ -1772,10 +2107,41 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                         </div>
                     </div>
                 )}
+                {active === 'statusColors' && (
+                    <div className="space-y-6">
+                        <h2 className="text-sm font-extrabold uppercase tracking-[0.18em]" style={{ color: accentColor }}>Status Colors</h2>
+                        <p className="text-[11px] font-medium max-w-2xl" style={{ color: accentColor, opacity: .8 }}>Adjust pipeline status colors. Click a swatch to edit; regenerate to auto-pick a fresh accessible palette.</p>
+                        <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+                            {Object.entries(_customStatusColors).map(([k, v]) => (
+                                <div key={k} className="flex items-center gap-3 p-3 rounded-xl ring-1 ring-white/60 bg-white/60 dark:bg-[#1A2330]/70">
+                                    <button type="button" aria-label={`Change ${k} color`} className="w-10 h-10 rounded-lg ring-1 ring-black/10 shadow-inner" style={{ background: v }} onClick={() => {
+                                        const next = prompt(`New hex for ${k}`, v) || v; if (/^#([0-9a-fA-F]{6})$/.test(next)) _updateStatusColor(k, next.toUpperCase());
+                                    }} />
+                                    <div className="flex-1 min-w-0">
+                                        <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: accentColor }}>{k}</div>
+                                        <div className="text-[10px] font-mono opacity-70 truncate" style={{ color: accentColor }}>{v}</div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="flex flex-wrap gap-3">
+                            <button type="button" onClick={() => _regenerateStatusColors()} className="px-4 h-10 rounded-xl text-[12px] font-semibold ring-1 bg-white/70 hover:bg-white ring-white/60" style={{ color: accentColor }}>Regenerate Palette</button>
+                            <button type="button" onClick={exportTheme} className="px-4 h-10 rounded-xl text-[12px] font-semibold ring-1 bg-white/70 hover:bg-white ring-white/60" style={{ color: accentColor }}>Export Theme JSON</button>
+                            <label className="px-4 h-10 rounded-xl text-[12px] font-semibold ring-1 bg-white/70 hover:bg-white ring-white/60 cursor-pointer inline-flex items-center" style={{ color: accentColor }}>
+                                <input type="file" accept="application/json,.json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) _importTheme(f); }} />
+                                Import Theme
+                            </label>
+                        </div>
+                    </div>
+                )}
                 {active === 'appearance' && (
                     <div className="space-y-4">
-                        <h2 className="text-sm font-extrabold uppercase tracking-[0.18em]" style={{ color: accentColor }}>Appearance</h2>
-                        <p className="text-[11px] font-medium" style={{ color: accentColor, opacity: .85 }}>Controls for compact mode, number formatting, and animation toggles will appear here.</p>
+                        <h2 className="text-sm font-extrabold uppercase tracking-[0.18em]" style={{ color: panelTextColor || accentColor }}>Appearance</h2>
+                        <p className="text-[11px] font-medium" style={{ color: panelTextColor || accentColor, opacity: .85 }}>Controls for compact mode, number formatting, and animation toggles will appear here.</p>
+                        <div className="flex flex-wrap gap-3 pt-2">
+                            <button onClick={() => { _toggleMode?.(); }} className="px-4 h-10 rounded-xl text-[12px] font-semibold bg-white/70 hover:bg-white ring-1 ring-white/60" style={{ color: accentColor }}>{theme.mode === 'dark' ? 'Switch to Light' : 'Switch to Dark'}</button>
+                            {/* Density toggle (coming soon) */}
+                        </div>
                     </div>
                 )}
                 {active === 'notifications' && (
@@ -1791,9 +2157,12 @@ function SettingsPanel({ theme, presets, setPreset, updateTheme, customStatusCol
                     </div>
                 )}
                 {active === 'advanced' && (
-                    <div className="space-y-4">
-                        <h2 className="text-sm font-extrabold uppercase tracking-[0.18em]" style={{ color: accentColor }}>Advanced</h2>
-                        <p className="text-[11px] font-medium" style={{ color: accentColor, opacity: .85 }}>Raw JSON theme editing, experimental feature flags, and data schema diagnostics (future).</p>
+                    <div className="space-y-6">
+                        <div className="space-y-2">
+                            <h2 className="text-sm font-extrabold uppercase tracking-[0.18em]" style={{ color: accentColor }}>Advanced</h2>
+                            <p className="text-[11px] font-medium" style={{ color: accentColor, opacity: .85 }}>Developer backups: create code snapshots (optionally archived) before major edits.</p>
+                        </div>
+                        <AdvancedBackupTools accentColor={accentColor} />
                     </div>
                 )}
             </div>
@@ -1832,3 +2201,85 @@ function LogoUploader({ label, value, onChange, clearLabel, accentColor, aspectH
 }
 
 // Removed unused helper components (ColorSuggestions, StatusColorEditors, ThemeIO, ColorInput) to satisfy lint no-unused-vars warnings.
+
+// Developer backup tools component (re-added)
+interface DevBackupMeta { name: string; files?: number; tag?: string; archived?: boolean; }
+function AdvancedBackupTools({ accentColor }: { accentColor: string }) {
+    const [backups, setBackups] = useState<DevBackupMeta[]>([]);
+    const [loadingList, setLoadingList] = useState(false);
+    const [creating, setCreating] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+    const reload = async () => {
+        setLoadingList(true); setError(null);
+        try {
+            const res = await fetch('/api/dev/backups', { cache: 'no-store' });
+            const data: { backups?: DevBackupMeta[]; error?: string } = await res.json();
+            if (!res.ok) throw new Error(data.error || 'List failed');
+            setBackups(data.backups || []);
+        } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+        finally { setLoadingList(false); }
+    };
+    useEffect(() => { reload(); }, []);
+    const createBackup = async (archive: boolean) => {
+        if (creating) return;
+        setCreating(true); setMessage(null); setError(null);
+        try {
+            const res = await fetch('/api/dev/backup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag: archive ? 'ui-arch' : 'ui', archive }) });
+            const data: { snapshot: string; files: number; archived?: boolean; error?: string } = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Backup failed');
+            setMessage(`Snapshot ${data.snapshot} (${data.files} files${data.archived ? ', archived' : ''})`);
+            await reload();
+        } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+        finally { setCreating(false); }
+    };
+    return (
+        <div className="rounded-2xl bg-white/50 ring-1 ring-white/60 p-4 space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+                <button disabled={creating} onClick={() => createBackup(false)} className="px-4 h-10 rounded-xl text-[11px] font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60 disabled:opacity-50">{creating ? 'Working…' : 'Backup (Folder)'}</button>
+                <button disabled={creating} onClick={() => createBackup(true)} className="px-4 h-10 rounded-xl text-[11px] font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60 disabled:opacity-50">{creating ? 'Working…' : 'Backup + Archive'}</button>
+                <button disabled={loadingList} onClick={reload} className="px-3 h-10 rounded-xl text-[11px] font-semibold bg-white/60 hover:bg-white ring-1 ring-white/60 disabled:opacity-50">Refresh</button>
+            </div>
+            {message && <div className="text-[11px] font-medium" style={{ color: accentColor }}>{message}</div>}
+            {error && <div className="text-[11px] font-medium text-red-600">{error}</div>}
+            <div className="space-y-2 max-h-72 overflow-auto pr-1">
+                {loadingList && <div className="text-[11px] opacity-70">Loading backups…</div>}
+                {!loadingList && backups.length === 0 && <div className="text-[11px] opacity-70">No snapshots yet.</div>}
+                {backups.map(b => {
+                    const archiveName = b.archived ? `${b.name}.tar.gz` : null;
+                    return (
+                        <div key={b.name} className="flex items-center gap-3 text-[11px] bg-white/70 rounded-xl px-3 py-2">
+                            <div className="flex-1 min-w-0">
+                                <div className="font-semibold truncate" style={{ color: accentColor }}>{b.name}</div>
+                                <div className="opacity-70">{b.files ?? '—'} files • tag: {b.tag} {b.archived ? '• archived' : ''}</div>
+                            </div>
+                            {archiveName && <a href={`/api/dev/backup/download?name=${archiveName}`} className="px-3 h-8 rounded-lg font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60 flex items-center">Download</a>}
+                            {pendingDelete === b.name ? (
+                                <div className="flex items-center gap-2">
+                                    <button onClick={async () => {
+                                        try {
+                                            const res = await fetch(`/api/dev/backup?name=${encodeURIComponent(b.name)}`, { method: 'DELETE' });
+                                            const data: { deleted?: string; error?: string } = await res.json();
+                                            if (!res.ok) throw new Error(data.error || 'Delete failed');
+                                            setMessage(`Deleted ${data.deleted}`);
+                                            setPendingDelete(null);
+                                            await reload();
+                                        } catch (e) { setError(e instanceof Error ? e.message : String(e)); setPendingDelete(null); }
+                                    }} className="px-3 h-8 rounded-lg font-semibold bg-red-600/80 text-white hover:bg-red-600">Confirm</button>
+                                    <button onClick={() => setPendingDelete(null)} className="px-3 h-8 rounded-lg font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60">Cancel</button>
+                                </div>
+                            ) : (
+                                <button onClick={() => setPendingDelete(b.name)} className="px-3 h-8 rounded-lg font-semibold bg-white/80 hover:bg-white ring-1 ring-white/60 flex items-center">Delete</button>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+            <div className="text-[10px] leading-relaxed opacity-70" style={{ color: accentColor }}>
+                Excludes: node_modules, .next, backups, .git, __pycache__. Use archive for a portable .tar.gz. Keep secrets safe.
+            </div>
+        </div>
+    );
+}
+

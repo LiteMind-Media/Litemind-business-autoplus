@@ -34,12 +34,24 @@ export default function CustomerCardsGrouped({ data, onUpdateCustomer, selection
     const containerRef = useRef<HTMLDivElement | null>(null);
     const { customStatusColors } = useTheme();
     // Compute unified lead numbering based on earliest chronological date
-    const internalLeadNumbers = useMemo(() => computeLeadNumbers(data), [data]);
+    // Sanitize duplicate IDs (React key collisions) by appending stable suffixes locally (does not mutate upstream state)
+    const sanitizedData = useMemo(() => {
+        const counts: Record<string, number> = {};
+        for (const c of data) counts[c.id] = (counts[c.id] || 0) + 1;
+        if (Object.values(counts).every(v => v === 1)) return data;
+        const seen: Record<string, number> = {};
+        return data.map(c => {
+            if (counts[c.id] === 1) return c;
+            const n = (seen[c.id] = (seen[c.id] || 0) + 1);
+            return { ...c, id: `${c.id}__dup${n}` } as Customer;
+        });
+    }, [data]);
+    const internalLeadNumbers = useMemo(() => computeLeadNumbers(sanitizedData), [sanitizedData]);
     const leadNumbers = externalLeadNumbers || internalLeadNumbers;
 
     const groups = useMemo(() => {
         const map = new Map<string, Customer[]>();
-        for (const c of data) {
+        for (const c of sanitizedData) {
             const key = formatYMD(c.dateAdded || "");
             const arr = map.get(key) || [];
             arr.push(c);
@@ -48,7 +60,7 @@ export default function CustomerCardsGrouped({ data, onUpdateCustomer, selection
         const entries = Array.from(map.entries());
         entries.sort((a, b) => (a[0] < b[0] ? 1 : -1)); // newest first
         return entries;
-    }, [data]);
+    }, [sanitizedData]);
 
     const dateKeys = useMemo(() => groups.map(([k]) => k), [groups]);
 
@@ -90,19 +102,22 @@ export default function CustomerCardsGrouped({ data, onUpdateCustomer, selection
                                 </div>
                             </div>
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5 mt-4">
-                                {customers.map(c => (
-                                    <GroupedCustomerCard
-                                        key={c.id}
-                                        c={c}
-                                        leadNumber={leadNumbers[c.id]}
-                                        customStatusColors={customStatusColors}
-                                        groupDate={k}
-                                        onUpdateCustomer={onUpdateCustomer}
-                                        selectionMode={selectionMode}
-                                        selected={!!selectedIds?.has(c.id)}
-                                        onToggleSelect={onToggleSelect}
-                                    />
-                                ))}
+                                {customers.map(c => {
+                                    const originalId = c.id.replace(/__dup\d+$/, '');
+                                    return (
+                                        <GroupedCustomerCard
+                                            key={c.id}
+                                            c={c as Customer}
+                                            leadNumber={leadNumbers[originalId]}
+                                            customStatusColors={customStatusColors}
+                                            groupDate={k}
+                                            onUpdateCustomer={onUpdateCustomer}
+                                            selectionMode={selectionMode}
+                                            selected={!!selectedIds?.has(originalId)}
+                                            onToggleSelect={onToggleSelect}
+                                        />
+                                    );
+                                })}
                             </div>
                         </section>
                     );

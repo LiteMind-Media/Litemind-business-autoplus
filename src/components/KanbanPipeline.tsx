@@ -51,7 +51,17 @@ const columnIcon: Record<ColumnId, React.ReactNode> = {
 export default function KanbanPipeline({ data, onUpdateCustomer, selectedIds, onToggleSelect, onOpen, leadNumbers: externalLeadNumbers }: KanbanPipelineProps) {
     const { customStatusColors } = useTheme();
     // Always call hook; then choose external if provided to satisfy hooks rules
-    const computedLeadNumbers = useMemo(() => computeLeadNumbers(data), [data]);
+    // Defensive: ensure no duplicate IDs (can happen if CSV seeding produced dup synthetic IDs before fix)
+    const dedupedData = useMemo(() => {
+        const seen = new Set<string>();
+        return data.filter(c => {
+            if (!c.id) return false;
+            if (seen.has(c.id)) return false;
+            seen.add(c.id);
+            return true;
+        });
+    }, [data]);
+    const computedLeadNumbers = useMemo(() => computeLeadNumbers(dedupedData), [dedupedData]);
     const leadNumbers = externalLeadNumbers || computedLeadNumbers;
     // Group customers by derived column
     const groups = useMemo(() => {
@@ -63,9 +73,9 @@ export default function KanbanPipeline({ data, onUpdateCustomer, selectedIds, on
             final_registered: [],
             final_other: [],
         };
-        for (const c of data) map[deriveColumnId(c)].push(c);
+        for (const c of dedupedData) map[deriveColumnId(c)].push(c);
         return map;
-    }, [data]);
+    }, [dedupedData]);
 
     const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
